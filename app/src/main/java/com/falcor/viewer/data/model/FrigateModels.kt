@@ -2,6 +2,7 @@ package com.falcor.viewer.data.model
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -34,6 +35,16 @@ data class Go2RtcConfig(
 ) {
     val streamKeys: Set<String> get() = streams.keys
 
+    /** Flatten every source string under a stream key (string or array of strings). */
+    fun sourceStrings(streamKey: String): List<String> {
+        val el = streams[streamKey] ?: return emptyList()
+        return flattenSources(el)
+    }
+
+    /** All source strings across all streams (for camera-wide talk scans). */
+    fun allSourceStrings(): List<String> =
+        streams.values.flatMap { flattenSources(it) }
+
     /** TCP port for go2rtc RTSP restream, or null if not configured / loopback-only. */
     fun rtspListenPort(): Int? = parseListenPort(listenString(rtsp), allowLoopback = false)
 
@@ -41,6 +52,16 @@ data class Go2RtcConfig(
     fun apiListenPort(): Int? = parseListenPort(listenString(api), allowLoopback = false)
 
     companion object {
+        fun flattenSources(el: JsonElement): List<String> = when (el) {
+            is JsonPrimitive -> listOfNotNull(el.contentOrNull?.trim()?.takeIf { it.isNotEmpty() })
+            is JsonArray -> el.flatMap { flattenSources(it) }
+            is JsonObject -> {
+                // Some configs nest { "url": "..." } — collect string-ish values
+                el.values.flatMap { flattenSources(it) }
+            }
+            else -> emptyList()
+        }
+
         fun listenString(section: JsonElement?): String? {
             if (section == null) return null
             val obj = section as? JsonObject ?: return (section as? JsonPrimitive)?.contentOrNull
@@ -88,7 +109,9 @@ data class CameraConfig(
     val ui: JsonElement? = null
 ) {
     val isEnabled: Boolean get() = enabled != false
-    val supportsPtzHint: Boolean get() = onvif != null
+    val hasOnvifHost: Boolean
+        get() = !onvif?.host.isNullOrBlank()
+    val supportsPtzHint: Boolean get() = onvif != null || hasOnvifHost
 }
 
 @Serializable
@@ -106,7 +129,9 @@ data class FeatureToggle(
 @Serializable
 data class OnvifConfig(
     val host: String? = null,
-    val port: Int? = null
+    val port: Int? = null,
+    val user: String? = null,
+    val password: String? = null
 )
 
 @Serializable
@@ -200,6 +225,31 @@ data class GenericSuccess(
     val message: String? = null
 )
 
+/**
+ * Per-camera capabilities derived from full Frigate `/api/config` (+ optional ptz/info).
+ * Drives PTZ button visibility, talk UI, stream names, and vendor hints.
+ */
+data class CameraCapabilities(
+    val name: String,
+    val enabled: Boolean,
+    /** Show PTZ control even if ptz/info 404 — user can try; snackbar on failure. */
+    val showPtz: Boolean,
+    val ptzFromOnvif: Boolean,
+    val ptzFromApi: Boolean,
+    val supportsZoom: Boolean,
+    val supportsFocus: Boolean,
+    val ptzPresets: List<String>,
+    /** Show Talk UI (WebRTC WebView). */
+    val showTalk: Boolean,
+    val talkStreamName: String?,
+    val audioEnabled: Boolean,
+    val streamNames: List<String>,
+    val liveRoleMap: Map<String, String>,
+    /** Vendor / path hints for logging/UI only. */
+    val vendorHints: List<String>,
+    val thumbnailUrl: String
+)
+
 /** UI-facing camera card model. */
 data class CameraUiModel(
     val name: String,
@@ -207,7 +257,22 @@ data class CameraUiModel(
     val supportsPtz: Boolean,
     val supportsAudio: Boolean,
     val streamNames: List<String>,
-    val thumbnailUrl: String
+    val thumbnailUrl: String,
+    val capabilities: CameraCapabilities? = null
+)
+
+private val TALK_SOURCE_MARKERS = listOf(
+    "onvif://",
+    "reolink://",
+    "backchannel",
+    "#audio=opus",
+    "audio=opus"
+)
+
+private val TALK_KEY_MARKERS = listOf("talk", "twoway", "two_way", "two-way", "doorbell")
+
+private val VENDOR_HINTS = listOf(
+    "reolink", "amcrest", "hikvision", "dahua", "axis", "unifi", "wyze", "onvif", "rtsp://"
 )
 
 /**
@@ -241,12 +306,144 @@ fun resolveStreamNames(
     return resolved.toList()
 }
 
+fun detectVendorHints(camera: CameraConfig, go2rtc: Go2RtcConfig?, streamNames: List<String>): List<String> {
+    val hints = LinkedHashSet<String>()
+    val ffmpegText = camera.ffmpeg?.toString().orEmpty().lowercase()
+    VENDOR_HINTS.forEach { v ->
+        if (ffmpegText.contains(v.lowercase())) hints.add(v.removeSuffix("://"))
+    }
+    if (camera.hasOnvifHost) hints.add("onvif")
+    streamNames.forEach { name ->
+        go2rtc?.sourceStrings(name)?.forEach { src ->
+            val lower = src.lowercase()
+            VENDOR_HINTS.forEach { v ->
+                if (lower.contains(v.lowercase())) hints.add(v.removeSuffix("://"))
+            }
+        }
+    }
+    return hints.toList()
+}
+
+fun detectTalkCapability(
+    cameraName: String,
+    camera: CameraConfig,
+    go2rtc: Go2RtcConfig?,
+    streamNames: List<String>
+): Pair<Boolean, String?> {
+    val roleMap = camera.live?.streams.orEmpty()
+    val go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+
+    // Explicit talk / twoway / doorbell in live.streams keys or values
+    roleMap.entries.firstOrNull { (role, value) ->
+        TALK_KEY_MARKERS.any { role.contains(it, true) || value.contains(it, true) }
+    }?.value?.trim()?.takeIf { it.isNotEmpty() }?.let { return true to it }
+
+    streamNames.firstOrNull { name ->
+        TALK_KEY_MARKERS.any { name.contains(it, true) }
+    }?.let { return true to it }
+
+    go2rtcKeys.firstOrNull { key ->
+        key.contains(cameraName, true) && TALK_KEY_MARKERS.any { key.contains(it, true) }
+    }?.let { return true to it }
+
+    // Scan go2rtc source strings for talk-capable protocols / audio opus backchannel
+    val candidateKeys = LinkedHashSet<String>().apply {
+        addAll(streamNames)
+        add(cameraName)
+        go2rtcKeys.filter { it.contains(cameraName, true) }.forEach { add(it) }
+        roleMap.values.forEach { add(it.trim()) }
+    }
+
+    for (key in candidateKeys) {
+        val sources = go2rtc?.sourceStrings(key).orEmpty()
+        val talkish = sources.any { src ->
+            val lower = src.lowercase()
+            TALK_SOURCE_MARKERS.any { lower.contains(it) }
+        }
+        if (talkish) return true to key
+    }
+
+    // Audio enabled + talk-capable go2rtc sources (opus / onvif / reolink / backchannel)
+    val audioOn = camera.audio?.enabled == true
+    if (audioOn) {
+        val preferred = streamNames.firstOrNull() ?: cameraName
+        val sources = go2rtc?.sourceStrings(preferred).orEmpty() +
+            candidateKeys.flatMap { go2rtc?.sourceStrings(it).orEmpty() }
+        if (sources.any { src ->
+                val lower = src.lowercase()
+                TALK_SOURCE_MARKERS.any { lower.contains(it) } ||
+                    (lower.contains("ffmpeg:") && lower.contains("audio"))
+            }
+        ) {
+            return true to preferred
+        }
+    }
+
+    return false to null
+}
+
+/**
+ * Build [CameraCapabilities] from cached config + optional [PtzInfo] (ptz/info may 404).
+ *
+ * PTZ button: ONVIF configured OR ptz/info supported OR features include pt/zoom —
+ * even if ptz/info 404, onvif.host still shows the button.
+ */
+fun deriveCameraCapabilities(
+    name: String,
+    camera: CameraConfig,
+    config: FrigateConfig,
+    baseUrl: String,
+    ptzInfo: PtzInfo? = null
+): CameraCapabilities {
+    val go2rtc = config.go2rtc
+    val streams = resolveStreamNames(name, camera, go2rtc?.streamKeys.orEmpty())
+    val onvifConfigured = camera.hasOnvifHost || camera.onvif != null
+    val apiSupported = ptzInfo?.isSupported == true
+    val showPtz = onvifConfigured || apiSupported
+    val (talk, talkStream) = detectTalkCapability(name, camera, go2rtc, streams)
+    val vendors = detectVendorHints(camera, go2rtc, streams)
+    return CameraCapabilities(
+        name = name,
+        enabled = camera.isEnabled,
+        showPtz = showPtz,
+        ptzFromOnvif = onvifConfigured,
+        ptzFromApi = apiSupported,
+        supportsZoom = ptzInfo?.supportsZoom != false, // default true when unknown (ONVIF try)
+        supportsFocus = ptzInfo?.supportsFocus == true,
+        ptzPresets = ptzInfo?.presets.orEmpty(),
+        showTalk = talk,
+        talkStreamName = talkStream,
+        audioEnabled = camera.audio?.enabled == true,
+        streamNames = streams,
+        liveRoleMap = camera.live?.streams.orEmpty(),
+        vendorHints = vendors,
+        thumbnailUrl = "$baseUrl/api/$name/latest.jpg"
+    )
+}
+
+fun CameraCapabilities.toUi(): CameraUiModel = CameraUiModel(
+    name = name,
+    enabled = enabled,
+    supportsPtz = showPtz,
+    supportsAudio = showTalk,
+    streamNames = streamNames,
+    thumbnailUrl = thumbnailUrl,
+    capabilities = this
+)
+
 fun CameraConfig.toUi(
     name: String,
     baseUrl: String,
     ptzSupported: Boolean? = null,
-    go2rtcStreamKeys: Set<String> = emptySet()
+    go2rtcStreamKeys: Set<String> = emptySet(),
+    config: FrigateConfig? = null,
+    ptzInfo: PtzInfo? = null
 ): CameraUiModel {
+    if (config != null) {
+        val caps = deriveCameraCapabilities(name, this, config, baseUrl, ptzInfo)
+        val withPtz = if (ptzSupported == true) caps.copy(showPtz = true) else caps
+        return withPtz.toUi()
+    }
     val streamMap = live?.streams.orEmpty()
     val streams = resolveStreamNames(name, this, go2rtcStreamKeys)
     val audioOn = audio?.enabled == true
@@ -255,9 +452,9 @@ fun CameraConfig.toUi(
         enabled = isEnabled,
         supportsPtz = ptzSupported ?: supportsPtzHint,
         supportsAudio = audioOn || streams.any {
-            it.contains("talk", true) || it.contains("twoway", true) || it.contains("two_way", true)
+            TALK_KEY_MARKERS.any { m -> it.contains(m, true) }
         } || streamMap.keys.any {
-            it.contains("talk", true) || it.contains("twoway", true) || it.contains("two_way", true)
+            TALK_KEY_MARKERS.any { m -> it.contains(m, true) }
         },
         streamNames = streams,
         thumbnailUrl = "$baseUrl/api/$name/latest.jpg"

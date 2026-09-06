@@ -3,6 +3,7 @@ package com.falcor.viewer.data.repo
 import android.util.Log
 import com.falcor.viewer.data.api.FrigateApi
 import com.falcor.viewer.data.api.FrigateClientFactory
+import com.falcor.viewer.data.model.CameraCapabilities
 import com.falcor.viewer.data.model.CameraSetBody
 import com.falcor.viewer.data.model.CameraUiModel
 import com.falcor.viewer.data.model.FrigateConfig
@@ -10,6 +11,7 @@ import com.falcor.viewer.data.model.FrigateEvent
 import com.falcor.viewer.data.model.LoginRequest
 import com.falcor.viewer.data.model.PtzInfo
 import com.falcor.viewer.data.model.RecordingSegment
+import com.falcor.viewer.data.model.deriveCameraCapabilities
 import com.falcor.viewer.data.model.resolveStreamNames
 import com.falcor.viewer.data.model.toUi
 import com.falcor.viewer.data.prefs.SecureCredentialStore
@@ -174,13 +176,24 @@ class FrigateRepository(
         runCatching {
             val config = cachedConfig ?: requireApi().getConfig().also { cachedConfig = it }
             val base = baseUrl
-            val go2rtcKeys = config.go2rtc?.streamKeys.orEmpty()
             config.cameras.map { (name, cam) ->
-                val ptz = runCatching { requireApi().getPtzInfo(name).isSupported }.getOrNull()
-                cam.toUi(name, base, ptz, go2rtcKeys)
+                val ptzInfo = runCatching { requireApi().getPtzInfo(name) }.getOrNull()
+                deriveCameraCapabilities(name, cam, config, base, ptzInfo).toUi()
             }.sortedBy { it.name }
         }
     }
+
+    /** Full capability snapshot for one camera (uses cached config). */
+    suspend fun getCameraCapabilities(camera: String): Result<CameraCapabilities> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val config = cachedConfig ?: requireApi().getConfig().also { cachedConfig = it }
+                val cam = config.cameras[camera]
+                    ?: error("Camera not in config: $camera")
+                val ptzInfo = runCatching { requireApi().getPtzInfo(camera) }.getOrNull()
+                deriveCameraCapabilities(camera, cam, config, baseUrl, ptzInfo)
+            }
+        }
 
     /**
      * Enable/disable camera via Frigate runtime API.
@@ -302,7 +315,7 @@ class FrigateRepository(
                 return@runCatching
             }
             if (ws?.state?.value != FrigateWsClient.ConnectionState.CONNECTED) {
-                error("PTZ WebSocket unavailable")
+                error("PTZ WebSocket unavailable — check Frigate WS and ONVIF config")
             }
             error("PTZ command failed: HTTP ${response?.code() ?: "no response"}")
         }
@@ -439,7 +452,13 @@ class FrigateRepository(
     }
 
     fun talkStreamName(streamNames: List<String>, camera: String): String? {
-        val go2rtcKeys = cachedConfig?.go2rtc?.streamKeys.orEmpty()
+        val config = cachedConfig
+        val cam = config?.cameras?.get(camera)
+        if (config != null && cam != null) {
+            val caps = deriveCameraCapabilities(camera, cam, config, baseUrl, null)
+            if (!caps.talkStreamName.isNullOrBlank()) return caps.talkStreamName
+        }
+        val go2rtcKeys = config?.go2rtc?.streamKeys.orEmpty()
         val talkFromNames = streamNames.firstOrNull {
             it.contains("talk", true) || it.contains("twoway", true) || it.contains("two_way", true)
         }
@@ -452,7 +471,29 @@ class FrigateRepository(
         return streamNames.firstOrNull() ?: camera.takeIf { it in go2rtcKeys || go2rtcKeys.isEmpty() }
     }
 
-    /** Talk / live RTSP URL only when config exposes RTSP listen; else null (use HTTPS candidates). */
+    /**
+     * Candidate Frigate/go2rtc WebRTC talk pages (in-app WebView).
+     * True Frigate talk is WebRTC — not swapping live to RTSP.
+     */
+    fun webrtcTalkPageUrls(camera: String, streamName: String?): List<String> {
+        val base = baseUrl.trimEnd('/')
+        val src = (streamName ?: camera).trim().ifBlank { camera }
+        val encoded = java.net.URLEncoder.encode(src, Charsets.UTF_8.name())
+        return listOf(
+            "$base/live/webrtc/webrtc.html?src=$encoded",
+            "$base/live/webrtc/index.html?src=$encoded",
+            "$base/api/go2rtc/webrtc.html?src=$encoded",
+            "$base/api/go2rtc/stream.html?src=$encoded"
+        ).distinct()
+    }
+
+    /** Bearer token value without "Bearer " prefix, for WebView cookie injection. */
+    fun jwtTokenRaw(): String? {
+        val token = credentials?.token?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        return token.removePrefix("Bearer ").removePrefix("bearer ").trim().takeIf { it.isNotEmpty() }
+    }
+
+    /** Talk / live RTSP URL only when config exposes RTSP listen; else null (live only — not talk). */
     fun rtspUrlForStream(streamName: String): String? {
         val host = runCatching { URI(baseUrl).host }.getOrNull() ?: return null
         val port = cachedConfig?.go2rtc?.rtspListenPort() ?: return null

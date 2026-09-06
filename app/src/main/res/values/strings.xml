@@ -32,6 +32,7 @@
     <string name="home_error_load">Failed to load cameras</string>
     <string name="home_camera_enabled">Enabled</string>
     <string name="home_camera_disabled">Disabled</string>
+    <string name="home_live_tile">Live</string>
     <string name="home_toggle_enable">Enable camera</string>
     <string name="home_toggle_disable">Disable camera</string>
     <string name="home_logout">Sign out</string>
@@ -49,6 +50,10 @@
     <string name="camera_talk">Talk</string>
     <string name="camera_talk_on">Talking…</string>
     <string name="camera_talk_unavailable">Two-way audio not available</string>
+    <string name="camera_talk_webrtc_title">Two-way talk</string>
+    <string name="camera_talk_webrtc_hint">Uses Frigate go2rtc WebRTC. Allow microphone access if prompted.</string>
+    <string name="camera_talk_webrtc_failed">Could not open WebRTC talk. Ensure go2rtc has an onvif://, reolink://, or talk stream with audio for this camera.</string>
+    <string name="camera_talk_close">Close</string>
     <string name="camera_ptz">PTZ</string>
     <string name="camera_ptz_open">Open PTZ controls</string>
     <string name="camera_ptz_sheet_title">PTZ controls</string>
@@ -66,6 +71,7 @@
     <string name="camera_ptz_stop">Stop PTZ</string>
     <string name="camera_ptz_presets">Presets</string>
     <string name="camera_ptz_ws_error">Could not connect to Frigate PTZ WebSocket. Check network and credentials.</string>
+    <string name="camera_ptz_command_error">PTZ command failed. Check ONVIF settings for this camera in Frigate.</string>
     <string name="camera_history">History</string>
     <string name="camera_history_live">Jump to live</string>
     <string name="camera_history_loading">Loading recordings…</string>
@@ -76,6 +82,11 @@
     <string name="camera_permission_mic">Microphone permission is required for talk-back.</string>
     <string name="camera_back">Back</string>
     <string name="camera_retry">Retry</string>
+
+    <!-- Authenticated media -->
+    <string name="media_downloading">Downloading clip…</string>
+    <string name="media_not_found">No recording for this time range</string>
+    <string name="media_download_failed">Could not download clip. Check auth and TLS.</string>
 
     <!-- Alerts -->
     <string name="alerts_title">Alerts</string>

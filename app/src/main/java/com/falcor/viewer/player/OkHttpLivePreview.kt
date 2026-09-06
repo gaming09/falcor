@@ -49,6 +49,8 @@ fun OkHttpLivePreview(
     okHttpClient: OkHttpClient,
     modifier: Modifier = Modifier,
     snapshotIntervalMs: Long = 350L,
+    /** Prefer polled latest.jpg (lighter for home grid with many cameras). */
+    snapshotOnly: Boolean = false,
     onPlaying: (() -> Unit)? = null,
     onError: ((String) -> Unit)? = null
 ) {
@@ -76,30 +78,32 @@ fun OkHttpLivePreview(
         onDispose { cancelled.set(true) }
     }
 
-    LaunchedEffect(mjpegUrl, snapshotUrl, streamClient, snapshotClient) {
+    LaunchedEffect(mjpegUrl, snapshotUrl, streamClient, snapshotClient, snapshotOnly) {
         loading = true
         errorText = null
         var gotFrame = false
 
-        try {
-            gotFrame = withContext(Dispatchers.IO) {
-                streamJpegFrames(streamClient, mjpegUrl, cancelled) { frame ->
-                    withContext(Dispatchers.Main.immediate) {
-                        bitmap?.takeIf { it !== frame && !it.isRecycled }?.recycle()
-                        bitmap = frame
-                        loading = false
-                        onPlayingState?.invoke()
+        if (!snapshotOnly) {
+            try {
+                gotFrame = withContext(Dispatchers.IO) {
+                    streamJpegFrames(streamClient, mjpegUrl, cancelled) { frame ->
+                        withContext(Dispatchers.Main.immediate) {
+                            bitmap?.takeIf { it !== frame && !it.isRecycled }?.recycle()
+                            bitmap = frame
+                            loading = false
+                            onPlayingState?.invoke()
+                        }
                     }
                 }
+            } catch (t: Throwable) {
+                Log.w(TAG, "MJPEG stream failed: ${t.message}")
             }
-        } catch (t: Throwable) {
-            Log.w(TAG, "MJPEG stream failed: ${t.message}")
         }
 
         if (!isActive || cancelled.get()) return@LaunchedEffect
 
         if (!gotFrame) {
-            Log.i(TAG, "Falling back to snapshot poll: $snapshotUrl")
+            if (!snapshotOnly) Log.i(TAG, "Falling back to snapshot poll: $snapshotUrl")
             while (isActive && !cancelled.get()) {
                 try {
                     val frame = withContext(Dispatchers.IO) {

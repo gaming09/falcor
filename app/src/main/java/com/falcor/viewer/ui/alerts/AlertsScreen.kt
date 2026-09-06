@@ -54,7 +54,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.falcor.viewer.R
 import com.falcor.viewer.data.model.FrigateEvent
-import com.falcor.viewer.player.VlcPlayer
+import com.falcor.viewer.player.AuthenticatedClipPlayer
 import com.falcor.viewer.ui.components.ErrorRetry
 import java.text.DateFormat
 import java.util.Date
@@ -265,9 +265,9 @@ fun AlertDetailScreen(
                 .padding(16.dp)
         ) {
             if (showClip && event.hasClip == true) {
-                VlcPlayer(
-                    mediaUrl = viewModel.clipUrl(event.id),
-                    headers = headers,
+                AuthenticatedClipPlayer(
+                    remoteUrl = viewModel.clipUrl(event.id),
+                    okHttpClient = viewModel.httpClient(),
                     mute = false,
                     modifier = Modifier.fillMaxWidth()
                 )

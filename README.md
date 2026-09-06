@@ -2,17 +2,19 @@
 
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch live and recorded video with LibVLC, control PTZ, use talk-back when available, and review detection events — all against your self-hosted Frigate instance.
 
-Package ID: `com.falcor.viewer`
+Package ID: `com.falcor.viewer`  
+Version: **0.1.3**
 
 ## Features
 
 - **Persistent login** — Frigate base URL plus username/password (`POST /api/login` → JWT) or pasted Bearer token, stored in `EncryptedSharedPreferences`. Session restores on launch. Self-signed HTTPS on :8971 is trusted for local NVR use.
-- **Camera grid** — cameras from `GET /api/config`, with enable/disable toggles via Frigate’s runtime camera API (`PUT /api/camera/{name}/set/enabled`).
+- **Config-driven cameras** — full `GET /api/config` is cached. Per-camera `CameraCapabilities` derive PTZ, talk, stream names, and vendor hints from `cameras.*.onvif`, `live.streams`, `audio`, `go2rtc.streams` sources, and `GET /api/{cam}/ptz/info`.
+- **Home live grid** — every enabled camera shows a **live** OkHttp preview (polled `latest.jpg` ~500ms on visible LazyGrid tiles) instead of a static Coil snapshot. Enable/disable toggles remain.
 - **Live streaming** — driven by cached `/api/config` (go2rtc stream names + optional listen ports). Prefers authenticated HTTPS on the Frigate base URL (HLS/MJPEG). LibVLC tries config-derived candidates; if they fail (common with self-signed TLS), Falcor falls back to an **OkHttp MJPEG / snapshot live preview**. Direct RTSP/go2rtc HTTP only when `go2rtc.rtsp` / `go2rtc.api` listen appears in config.
-- **Two-way audio** — talk UI when the camera/config suggests audio support; requests `RECORD_AUDIO` and switches to a talk-capable go2rtc stream when possible. Hidden/disabled gracefully otherwise.
-- **PTZ** — toolbar / chip button opens a dedicated bottom-sheet D-pad when Frigate reports PTZ (`/api/{camera}/ptz/info` or ONVIF in config). Commands use the same **WebSocket** path as the official Frigate web UI (`ws(s)://<host>/ws`, topic `{camera}/ptz`). Press-and-hold sends `MOVE_*` / `ZOOM_*` / `FOCUS_*`; release sends `STOP`. Presets listed from ptz/info. Controls hide when unsupported.
-- **History scrubber** — recordings from `/api/{camera}/recordings`; scrubbing seeks the VLC player using Frigate VOD/clip endpoints.
-- **Alerts** — events from `/api/events` with camera/label/clip/snapshot filters; open snapshot or clip in a review screen.
+- **Two-way audio (WebRTC)** — Talk opens an in-app **WebView** to Frigate’s go2rtc WebRTC player (`/live/webrtc/webrtc.html?src=…` and related paths), with JWT cookie + Authorization injected. Detects talk capability from go2rtc sources (`onvif://`, `reolink://`, `backchannel`, `#audio=opus`) or stream keys (`talk` / `twoway` / `doorbell`), not only a literal `talk` live.streams key. Mic permission required. No fake RTSP talk swap.
+- **PTZ** — toolbar / chip button whenever ONVIF is configured **or** ptz/info reports support (even if ptz/info 404, `onvif.host` still shows the button). Commands use Frigate **WebSocket** (`ws(s)://<host>/ws`, topic `{camera}/ptz`, payload `MOVE_*` / `STOP`). Press-and-hold; clear snackbar on failure. HTTP PTZ is last-resort fallback.
+- **History scrubber** — recordings from `/api/{camera}/recordings`; scrubbing downloads `/api/{cam}/start/…/end/…/clip.mp4` via trusted OkHttp → cache file → LibVLC `file://` (avoids VLC failing on HTTPS+JWT+self-signed).
+- **Alerts** — events from `/api/events`; **Play clip** uses the same authenticated download+play path. Snapshots remain Coil + OkHttp.
 - **Dark Material 3 UI** — Jetpack Compose, fully localized English strings in `res/values/strings.xml`.
 
 ## Requirements
@@ -97,11 +99,12 @@ This is intentional for **self-hosted / private-network** Frigate only. Do not p
 
 ### Streaming notes
 
-After login (and on session restore), Falcor caches `GET /api/config` and derives stream names and optional ports from it:
+After login (and on session restore), Falcor caches `GET /api/config` and derives stream names, ports, PTZ, and talk from it:
 
 - **Cameras / live.streams** — role → go2rtc stream name (main/sub/talk)
-- **go2rtc.streams** keys — authoritative restream names
-- **go2rtc.rtsp.listen** / **go2rtc.api.listen** — only if present and not loopback-only; Falcor never invents closed Docker ports like a blind `:8554` / `:1984`
+- **go2rtc.streams** keys + source strings — authoritative restream names; talk detected from `onvif://`, `reolink://`, `backchannel`, `#audio=opus`, or keys containing talk/twoway/doorbell
+- **cameras.*.onvif** — PTZ candidate even when `/api/{cam}/ptz/info` returns 404
+- **go2rtc.rtsp.listen** / **go2rtc.api.listen** — only if present and not loopback-only; Falcor never invents closed Docker ports
 
 Live URL order:
 
@@ -114,8 +117,9 @@ If those optional listens are absent, Falcor degrades to HTTPS MJPEG + `latest.j
 
 LibVLC uses `:http-header=Authorization: Bearer <token>` (not `:http-password=`). Its own TLS stack may still reject Frigate’s self-signed cert; when every LibVLC candidate fails, the camera screen switches to **OkHttp live preview** (MJPEG stream or ~350ms `latest.jpg` poll) so you still see moving video.
 
-- Thumbnails use `GET /api/{camera}/latest.jpg` (Coil + same trusted OkHttp client).
-- History/playback uses `/api/vod/...` and `/api/{camera}/start/.../end/.../clip.mp4`.
+- Home tiles poll `latest.jpg` (~500ms) per **visible** LazyGrid item (lighter than N simultaneous MJPEGs).
+- History / event clips: OkHttp download of `clip.mp4` → app cache → LibVLC `file://`.
+- Talk: WebView to `/live/webrtc/webrtc.html?src=<stream>` (and fallbacks), not RTSP.
 
 ## Permissions
 
@@ -131,8 +135,8 @@ LibVLC uses `:http-header=Authorization: Bearer <token>` (not `:http-password=`)
 ```text
 app/src/main/java/com/falcor/viewer/
   FalcorApp.kt, MainActivity.kt
-  data/          # Retrofit API, models, repository, secure prefs, Frigate WebSocket client
-  player/        # LibVLC Compose AndroidView
+  data/          # Retrofit API, models, repository, media downloader, secure prefs, Frigate WebSocket
+  player/        # LibVLC, OkHttp live preview, authenticated clip player, WebRTC talk WebView
   ui/            # theme, login, home, camera, alerts, navigation
 ```
 
@@ -141,17 +145,18 @@ app/src/main/java/com/falcor/viewer/
 | Feature | Endpoint(s) |
 | --- | --- |
 | Login (JWT) | `POST /api/login` body `{"user","password"}` → `frigate_token` cookie / Bearer |
-| Config / cameras | `GET /api/config` |
+| Config / cameras | `GET /api/config` (cached; drives capabilities) |
 | Enable/disable | `PUT /api/camera/{cam}/set/enabled` body `{"value":"ON"|"OFF"}` |
 | Events | `GET /api/events` |
 | Recordings | `GET /api/{cam}/recordings` |
 | PTZ info | `GET /api/{cam}/ptz/info` |
-| PTZ move | WebSocket `ws(s)://<base>/ws` — JSON `{"topic":"{cam}/ptz","payload":"MOVE_LEFT","retain":false}` (same as Frigate web UI); HTTP `GET /api/{cam}/ptz/{command}` is last-resort fallback only |
-| Live | HTTPS HLS/MJPEG on base URL first; OkHttp MJPEG/snapshot fallback; RTSP `:8554` last |
+| PTZ move | WebSocket `ws(s)://<base>/ws` — JSON `{"topic":"{cam}/ptz","payload":"MOVE_LEFT","retain":false}`; HTTP `GET /api/{cam}/ptz/{command}` last-resort |
+| Live | HTTPS HLS/MJPEG on base URL; OkHttp MJPEG/snapshot; home tiles = live poll |
+| Talk | WebRTC WebView `/live/webrtc/webrtc.html?src=` (+ `/api/go2rtc/…` fallbacks) |
+| History / clips | OkHttp download `/api/{cam}/start/{s}/end/{e}/clip.mp4` or `/api/events/{id}/clip.mp4` → local play |
 | Event media | `/api/events/{id}/snapshot.jpg`, `/clip.mp4` |
 
 Falcor degrades gracefully when an endpoint is missing or returns 404 (e.g. PTZ or talk on cameras that do not support them).
-
 
 ## PTZ (WebSocket)
 
@@ -163,7 +168,7 @@ Falcor mirrors the Frigate web UI for pan/tilt/zoom:
 3. Commands: `{ "topic": "<camera>/ptz", "payload": "<CMD>", "retain": false }` where `<CMD>` is  
    `MOVE_UP` / `MOVE_DOWN` / `MOVE_LEFT` / `MOVE_RIGHT` / `ZOOM_IN` / `ZOOM_OUT` / `FOCUS_IN` / `FOCUS_OUT` / `STOP` / `preset_<name>`.
 4. Auth: the same `Authorization: Bearer <JWT>` header used for HTTP is attached to the WebSocket handshake (permissive TLS for `wss://` on :8971).
-5. Feature detection still uses `GET /api/{camera}/ptz/info` (features + presets). The camera screen shows a **PTZ** action in the top app bar; tapping opens a modal bottom sheet with press-and-hold controls.
+5. Feature detection uses config ONVIF + `GET /api/{camera}/ptz/info`. The camera screen shows a **PTZ** action whenever ONVIF host is set or ptz/info reports support.
 
 ## License
 

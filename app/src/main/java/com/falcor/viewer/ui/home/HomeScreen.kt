@@ -34,17 +34,16 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import com.falcor.viewer.R
 import com.falcor.viewer.data.model.CameraUiModel
+import com.falcor.viewer.player.OkHttpLivePreview
 import com.falcor.viewer.ui.components.ErrorRetry
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -57,7 +56,8 @@ fun HomeScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val app = LocalContext.current.applicationContext as com.falcor.viewer.FalcorApp
-    val headers = app.repository.authHeaders()
+    val httpClient = remember { app.repository.authenticatedHttpClient() }
+    val baseUrl = remember { app.repository.baseUrl.trimEnd('/') }
 
     Scaffold(
         topBar = {
@@ -110,6 +110,8 @@ fun HomeScreen(
                 }
             }
             else -> {
+                // LazyVerticalGrid only composes visible items — use snapshot poll
+                // (~500ms) so many cameras don't open simultaneous MJPEG streams.
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(160.dp),
                     contentPadding = PaddingValues(12.dp),
@@ -120,7 +122,9 @@ fun HomeScreen(
                     items(state.cameras, key = { it.name }) { cam ->
                         CameraCard(
                             camera = cam,
-                            headers = headers,
+                            mjpegUrl = "$baseUrl/api/${cam.name}",
+                            snapshotUrl = cam.thumbnailUrl,
+                            okHttpClient = httpClient,
                             toggling = state.toggling == cam.name,
                             onOpen = { onOpenCamera(cam.name) },
                             onToggle = { viewModel.toggleCamera(cam) }
@@ -154,7 +158,9 @@ fun HomeScreen(
 @Composable
 private fun CameraCard(
     camera: CameraUiModel,
-    headers: Map<String, String>,
+    mjpegUrl: String,
+    snapshotUrl: String,
+    okHttpClient: okhttp3.OkHttpClient,
     toggling: Boolean,
     onOpen: () -> Unit,
     onToggle: () -> Unit
@@ -165,19 +171,34 @@ private fun CameraCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column {
-            AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(camera.thumbnailUrl)
-                    .apply { headers.forEach { (k, v) -> addHeader(k, v) } }
-                    .crossfade(true)
-                    .build(),
-                contentDescription = stringResource(R.string.cd_thumbnail),
-                contentScale = ContentScale.Crop,
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
                     .clickable(onClick = onOpen)
-            )
+            ) {
+                if (camera.enabled) {
+                    OkHttpLivePreview(
+                        mjpegUrl = mjpegUrl,
+                        snapshotUrl = snapshotUrl,
+                        okHttpClient = okHttpClient,
+                        snapshotOnly = true,
+                        snapshotIntervalMs = 500L,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            stringResource(R.string.home_camera_disabled),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -193,7 +214,7 @@ private fun CameraCard(
                     )
                     Text(
                         stringResource(
-                            if (camera.enabled) R.string.home_camera_enabled else R.string.home_camera_disabled
+                            if (camera.enabled) R.string.home_live_tile else R.string.home_camera_disabled
                         ),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant

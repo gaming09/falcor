@@ -77,6 +77,7 @@ class AlertsViewModel(
     fun thumbnailUrl(id: String) = repository.eventThumbnailUrl(id)
     fun clipUrl(id: String) = repository.eventClipUrl(id)
     fun authHeaders() = repository.authHeaders()
+    fun httpClient() = repository.authenticatedHttpClient()
 
     companion object {
         fun factory(repo: FrigateRepository) = object : ViewModelProvider.Factory {

@@ -3,10 +3,13 @@ package com.falcor.viewer.ui.camera
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.falcor.viewer.data.model.CameraCapabilities
+import com.falcor.viewer.data.model.toUi
 import com.falcor.viewer.data.model.CameraUiModel
 import com.falcor.viewer.data.model.RecordingSegment
 import com.falcor.viewer.data.repo.FrigateRepository
 import com.falcor.viewer.data.ws.FrigateWsClient
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -22,12 +25,18 @@ enum class StreamQuality { MAIN, SUB }
 data class CameraUiState(
     val cameraName: String,
     val camera: CameraUiModel? = null,
+    val capabilities: CameraCapabilities? = null,
     val loading: Boolean = true,
     val mediaUrl: String? = null,
     val candidateUrls: List<String> = emptyList(),
     val candidateIndex: Int = 0,
     /** When true, LibVLC candidates are exhausted — show OkHttp MJPEG/snapshot preview. */
     val useOkHttpPreview: Boolean = false,
+    /**
+     * When set, play this remote clip via OkHttp download → local file → VLC
+     * (history scrub / authenticated VOD).
+     */
+    val authenticatedClipUrl: String? = null,
     val quality: StreamQuality = StreamQuality.SUB,
     val isLive: Boolean = true,
     val ptzSupported: Boolean = false,
@@ -37,6 +46,11 @@ data class CameraUiState(
     val ptzSheetOpen: Boolean = false,
     val talkSupported: Boolean = false,
     val talking: Boolean = false,
+    /** WebRTC talk dialog open. */
+    val talkWebRtcOpen: Boolean = false,
+    val talkWebRtcUrl: String? = null,
+    val talkWebRtcCandidates: List<String> = emptyList(),
+    val talkWebRtcIndex: Int = 0,
     val recordings: List<RecordingSegment> = emptyList(),
     val historyLoading: Boolean = false,
     val historyProgress: Float = 1f,
@@ -48,6 +62,10 @@ data class CameraUiState(
 
 sealed class CameraUserMessage {
     data object PtzWsFailed : CameraUserMessage()
+    data object PtzCommandFailed : CameraUserMessage()
+    data object TalkWebRtcFailed : CameraUserMessage()
+    data object HistoryNotFound : CameraUserMessage()
+    data object HistoryDownloadFailed : CameraUserMessage()
 }
 
 class CameraViewModel(
@@ -58,10 +76,11 @@ class CameraViewModel(
     private val _state = MutableStateFlow(CameraUiState(cameraName = cameraName))
     val state: StateFlow<CameraUiState> = _state.asStateFlow()
 
-    private val _messages = MutableSharedFlow<CameraUserMessage>(extraBufferCapacity = 1)
+    private val _messages = MutableSharedFlow<CameraUserMessage>(extraBufferCapacity = 4)
     val messages: SharedFlow<CameraUserMessage> = _messages.asSharedFlow()
 
     private var ptzWsAcquired = false
+    private var scrubJob: Job? = null
 
     init {
         load()
@@ -71,12 +90,14 @@ class CameraViewModel(
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = false) }
             repository.ensureConfig()
+            val capsResult = repository.getCameraCapabilities(cameraName)
+            val caps = capsResult.getOrNull()
             val cameras = repository.getCameras()
             val cam = cameras.getOrNull()?.find { it.name == cameraName }
-            val ptzInfo = repository.getPtzInfo(cameraName).getOrNull()
-            val configHint = cam?.supportsPtz == true
-            val ptzSupported = ptzInfo?.isSupported == true || configHint
-            if (cam == null && cameras.isFailure) {
+                ?: caps?.toUi()
+
+            val ptzSupported = caps?.showPtz == true || cam?.supportsPtz == true
+            if (cam == null && cameras.isFailure && caps == null) {
                 _state.update { it.copy(loading = false, error = true) }
                 return@launch
             }
@@ -91,12 +112,13 @@ class CameraViewModel(
             _state.update {
                 it.copy(
                     camera = model,
+                    capabilities = caps,
                     loading = false,
                     ptzSupported = ptzSupported,
-                    ptzSupportsZoom = ptzInfo?.supportsZoom != false,
-                    ptzSupportsFocus = ptzInfo?.supportsFocus == true,
-                    ptzPresets = ptzInfo?.presets.orEmpty(),
-                    talkSupported = model.supportsAudio
+                    ptzSupportsZoom = caps?.supportsZoom != false,
+                    ptzSupportsFocus = caps?.supportsFocus == true,
+                    ptzPresets = caps?.ptzPresets.orEmpty(),
+                    talkSupported = caps?.showTalk == true || model.supportsAudio
                 )
             }
             if (ptzSupported) {
@@ -133,6 +155,9 @@ class CameraViewModel(
         _state.update {
             it.copy(
                 isLive = true,
+                talking = false,
+                talkWebRtcOpen = false,
+                authenticatedClipUrl = null,
                 candidateUrls = urls,
                 candidateIndex = 0,
                 mediaUrl = urls.firstOrNull(),
@@ -145,7 +170,7 @@ class CameraViewModel(
 
     fun onStreamError() {
         val s = _state.value
-        if (s.useOkHttpPreview) return
+        if (s.useOkHttpPreview || s.authenticatedClipUrl != null) return
         val next = s.candidateIndex + 1
         if (next < s.candidateUrls.size) {
             _state.update { it.copy(candidateIndex = next, mediaUrl = s.candidateUrls[next]) }
@@ -196,18 +221,33 @@ class CameraViewModel(
         val ts = start + (end - start) * progress.coerceIn(0f, 1f)
         val clipStart = ts
         val clipEnd = (ts + 60.0).coerceAtMost(end)
-        val vod = repository.vodPlaylistUrl(cameraName, clipStart, clipEnd)
+        // Prefer clip.mp4 for authenticated OkHttp download; VOD HLS is harder via file cache.
         val clip = repository.recordingPlaybackUrl(cameraName, clipStart, clipEnd)
-        _state.update {
-            it.copy(
-                isLive = false,
-                useOkHttpPreview = false,
-                historyProgress = progress,
-                scrubTimestamp = ts,
-                candidateUrls = listOf(vod, clip),
-                candidateIndex = 0,
-                mediaUrl = vod
-            )
+        scrubJob?.cancel()
+        scrubJob = viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    isLive = false,
+                    useOkHttpPreview = false,
+                    talking = false,
+                    talkWebRtcOpen = false,
+                    historyProgress = progress,
+                    scrubTimestamp = ts,
+                    mediaUrl = null,
+                    candidateUrls = emptyList(),
+                    candidateIndex = 0,
+                    authenticatedClipUrl = clip
+                )
+            }
+        }
+    }
+
+    fun onHistoryPlayError(kind: String) {
+        viewModelScope.launch {
+            when {
+                kind.equals("not_found", true) -> _messages.emit(CameraUserMessage.HistoryNotFound)
+                else -> _messages.emit(CameraUserMessage.HistoryDownloadFailed)
+            }
         }
     }
 
@@ -220,6 +260,8 @@ class CameraViewModel(
                     repository.ptzWsState()?.value == FrigateWsClient.ConnectionState.FAILED
                 ) {
                     _messages.emit(CameraUserMessage.PtzWsFailed)
+                } else {
+                    _messages.emit(CameraUserMessage.PtzCommandFailed)
                 }
             }
         }
@@ -229,35 +271,64 @@ class CameraViewModel(
         ptz("preset_$presetName")
     }
 
+    /**
+     * Two-way talk via Frigate/go2rtc WebRTC WebView — not RTSP swap.
+     */
     fun setTalking(talking: Boolean) {
-        _state.update { it.copy(talking = talking) }
-        if (talking) {
-            val cam = _state.value.camera ?: return
-            val talkName = repository.talkStreamName(cam.streamNames, cameraName) ?: cameraName
-            val talkUrl = repository.rtspUrlForStream(talkName)
-            if (talkUrl != null) {
-                _state.update {
-                    it.copy(
-                        mediaUrl = talkUrl,
-                        isLive = true,
-                        useOkHttpPreview = false,
-                        candidateUrls = listOf(talkUrl),
-                        candidateIndex = 0
-                    )
-                }
-            } else {
-                // No RTSP in config — keep HTTPS live candidates / OkHttp preview
-                applyLiveStream()
-                _state.update { it.copy(talking = true) }
+        if (!talking) {
+            _state.update {
+                it.copy(talking = false, talkWebRtcOpen = false, talkWebRtcUrl = null)
             }
-        } else if (_state.value.isLive) {
-            applyLiveStream()
+            if (_state.value.isLive) applyLiveStream()
+            return
+        }
+        val cam = _state.value.camera
+        val caps = _state.value.capabilities
+        val talkName = caps?.talkStreamName
+            ?: repository.talkStreamName(cam?.streamNames.orEmpty(), cameraName)
+            ?: cameraName
+        val candidates = repository.webrtcTalkPageUrls(cameraName, talkName)
+        _state.update {
+            it.copy(
+                talking = true,
+                talkWebRtcOpen = true,
+                talkWebRtcCandidates = candidates,
+                talkWebRtcIndex = 0,
+                talkWebRtcUrl = candidates.firstOrNull()
+            )
+        }
+    }
+
+    fun onTalkWebRtcFailed() {
+        val s = _state.value
+        val next = s.talkWebRtcIndex + 1
+        if (next < s.talkWebRtcCandidates.size) {
+            _state.update {
+                it.copy(
+                    talkWebRtcIndex = next,
+                    talkWebRtcUrl = s.talkWebRtcCandidates[next]
+                )
+            }
+        } else {
+            viewModelScope.launch { _messages.emit(CameraUserMessage.TalkWebRtcFailed) }
+            _state.update {
+                it.copy(talkWebRtcOpen = false, talking = false, talkWebRtcUrl = null)
+            }
+        }
+    }
+
+    fun closeTalkWebRtc() {
+        _state.update {
+            it.copy(talking = false, talkWebRtcOpen = false, talkWebRtcUrl = null)
         }
     }
 
     fun authHeaders(): Map<String, String> = repository.authHeaders()
 
+    fun jwtTokenRaw(): String? = repository.jwtTokenRaw()
+
     override fun onCleared() {
+        scrubJob?.cancel()
         if (ptzWsAcquired) {
             repository.disconnectPtzWs()
             ptzWsAcquired = false

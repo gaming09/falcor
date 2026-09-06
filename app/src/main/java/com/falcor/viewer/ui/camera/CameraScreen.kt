@@ -70,7 +70,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.falcor.viewer.R
+import com.falcor.viewer.player.AuthenticatedClipPlayer
 import com.falcor.viewer.player.OkHttpLivePreview
+import com.falcor.viewer.player.TalkWebRtcDialog
 import com.falcor.viewer.player.VlcPlayer
 import com.falcor.viewer.ui.components.ErrorRetry
 import java.text.DateFormat
@@ -86,6 +88,10 @@ fun CameraScreen(
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val ptzWsError = stringResource(R.string.camera_ptz_ws_error)
+    val ptzCmdError = stringResource(R.string.camera_ptz_command_error)
+    val talkWebRtcError = stringResource(R.string.camera_talk_webrtc_failed)
+    val historyNotFound = stringResource(R.string.media_not_found)
+    val historyFailed = stringResource(R.string.media_download_failed)
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -95,9 +101,11 @@ fun CameraScreen(
     LaunchedEffect(Unit) {
         viewModel.messages.collect { msg ->
             when (msg) {
-                CameraUserMessage.PtzWsFailed -> {
-                    snackbarHostState.showSnackbar(ptzWsError)
-                }
+                CameraUserMessage.PtzWsFailed -> snackbarHostState.showSnackbar(ptzWsError)
+                CameraUserMessage.PtzCommandFailed -> snackbarHostState.showSnackbar(ptzCmdError)
+                CameraUserMessage.TalkWebRtcFailed -> snackbarHostState.showSnackbar(talkWebRtcError)
+                CameraUserMessage.HistoryNotFound -> snackbarHostState.showSnackbar(historyNotFound)
+                CameraUserMessage.HistoryDownloadFailed -> snackbarHostState.showSnackbar(historyFailed)
             }
         }
     }
@@ -148,21 +156,33 @@ fun CameraScreen(
                         .padding(padding)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    if (state.useOkHttpPreview && state.isLive) {
-                        OkHttpLivePreview(
-                            mjpegUrl = viewModel.mjpegLiveUrl(),
-                            snapshotUrl = viewModel.snapshotLiveUrl(),
-                            okHttpClient = viewModel.httpClient(),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    } else {
-                        VlcPlayer(
-                            mediaUrl = state.mediaUrl,
-                            headers = viewModel.authHeaders(),
-                            mute = !state.talking,
-                            onError = { viewModel.onStreamError() },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                    when {
+                        !state.authenticatedClipUrl.isNullOrBlank() -> {
+                            AuthenticatedClipPlayer(
+                                remoteUrl = state.authenticatedClipUrl,
+                                okHttpClient = viewModel.httpClient(),
+                                mute = false,
+                                onError = viewModel::onHistoryPlayError,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        state.useOkHttpPreview && state.isLive -> {
+                            OkHttpLivePreview(
+                                mjpegUrl = viewModel.mjpegLiveUrl(),
+                                snapshotUrl = viewModel.snapshotLiveUrl(),
+                                okHttpClient = viewModel.httpClient(),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        else -> {
+                            VlcPlayer(
+                                mediaUrl = state.mediaUrl,
+                                headers = viewModel.authHeaders(),
+                                mute = true,
+                                onError = { viewModel.onStreamError() },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                     }
 
                     Row(
@@ -307,6 +327,15 @@ fun CameraScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             )
         }
+    }
+
+    if (state.talkWebRtcOpen && !state.talkWebRtcUrl.isNullOrBlank()) {
+        TalkWebRtcDialog(
+            pageUrl = state.talkWebRtcUrl!!,
+            bearerToken = viewModel.jwtTokenRaw(),
+            onDismiss = viewModel::closeTalkWebRtc,
+            onLoadFailed = viewModel::onTalkWebRtcFailed
+        )
     }
 }
 
