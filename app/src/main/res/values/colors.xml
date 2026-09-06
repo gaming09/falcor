@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="falcor_bg">#FF0B0F14</color>
+    <color name="falcor_primary">#FF3DDCFF</color>
+    <color name="falcor_secondary">#FF7C5CFF</color>
+    <color name="falcor_surface">#FF121820</color>
+    <color name="ic_launcher_background">#FF0B0F14</color>
+</resources>
