@@ -20,7 +20,8 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     FalcorNavHost(
                         repository = app.repository,
-                        credentialStore = app.credentialStore
+                        credentialStore = app.credentialStore,
+                        appPreferences = app.appPreferences
                     )
                 }
             }

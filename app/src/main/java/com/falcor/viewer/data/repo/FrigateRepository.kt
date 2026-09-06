@@ -18,6 +18,7 @@ import com.falcor.viewer.data.prefs.SecureCredentialStore
 import com.falcor.viewer.data.ws.FrigateWsClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
@@ -298,6 +299,10 @@ class FrigateRepository(
 
     fun ptzWsState(): StateFlow<FrigateWsClient.ConnectionState>? = wsClient?.state
 
+    fun detectionsFlow(): SharedFlow<FrigateWsClient.CameraDetections>? = wsClient?.detections
+
+    fun wsClientOrNull(): FrigateWsClient? = wsClient
+
     /**
      * Send a PTZ command via Frigate WebSocket (primary path used by the web UI).
      * Falls back to legacy HTTP GET /api/{cam}/ptz/{cmd} only if the socket is unavailable.
@@ -475,6 +480,48 @@ class FrigateRepository(
      * Candidate Frigate/go2rtc WebRTC talk pages (in-app WebView).
      * True Frigate talk is WebRTC — not swapping live to RTSP.
      */
+
+    /**
+     * Candidate Frigate/go2rtc live player pages (MSE/WebRTC) for smooth WebView live.
+     * Prefer these over LibVLC; OkHttp MJPEG remains fallback.
+     */
+    fun livePlayerPageUrls(camera: String, preferSub: Boolean = true, streamNames: List<String> = emptyList()): List<String> {
+        val base = baseUrl.trimEnd('/')
+        val config = cachedConfig
+        val go2rtc = config?.go2rtc
+        val camCfg = config?.cameras?.get(camera)
+        val roleMap = camCfg?.live?.streams.orEmpty()
+        val preferred = resolvePreferredStreamName(
+            camera = camera,
+            preferSub = preferSub,
+            roleMap = roleMap,
+            streamNames = streamNames.ifEmpty {
+                camCfg?.let { resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty()) }.orEmpty()
+            },
+            go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+        )
+        val names = linkedSetOf(preferred, camera).filter { it.isNotBlank() }
+        val enc = { s: String -> java.net.URLEncoder.encode(s, Charsets.UTF_8.name()) }
+        return buildList {
+            names.forEach { n ->
+                val e = enc(n)
+                add("$base/live/webrtc/webrtc.html?src=$e")
+                add("$base/api/go2rtc/webrtc.html?src=$e")
+                add("$base/api/go2rtc/stream.html?src=$e")
+                add("$base/live/mse/mse.html?src=$e")
+            }
+            // Frigate camera hash route (SPA) — last resort embed
+            add("$base/#$camera")
+        }.distinct()
+    }
+
+    /** Best-effort castable URL (HLS via Frigate, else MJPEG). */
+    fun castableStreamUrl(camera: String, preferSub: Boolean = true): String {
+        val urls = liveStreamUrls(camera, preferSub, emptyList())
+        return urls.firstOrNull { it.contains("m3u8", true) }
+            ?: mjpegLiveUrl(camera)
+    }
+
     fun webrtcTalkPageUrls(camera: String, streamName: String?): List<String> {
         val base = baseUrl.trimEnd('/')
         val src = (streamName ?: camera).trim().ifBlank { camera }

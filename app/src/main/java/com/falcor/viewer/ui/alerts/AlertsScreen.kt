@@ -269,7 +269,10 @@ fun AlertDetailScreen(
                     remoteUrl = viewModel.clipUrl(event.id),
                     okHttpClient = viewModel.httpClient(),
                     mute = false,
-                    modifier = Modifier.fillMaxWidth()
+                    downloadFileName = "falcor_event_${event.id}.mp4",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
                 )
             } else if (event.hasSnapshot == true) {
                 AsyncImage(

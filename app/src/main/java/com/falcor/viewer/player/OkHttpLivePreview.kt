@@ -136,8 +136,6 @@ fun OkHttpLivePreview(
 
     Box(
         modifier = modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
             .background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center
     ) {
@@ -146,7 +144,7 @@ fun OkHttpLivePreview(
             Image(
                 bitmap = frame.asImageBitmap(),
                 contentDescription = stringResource(R.string.camera_live_preview),
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.Fit,
                 modifier = Modifier.fillMaxSize()
             )
         }

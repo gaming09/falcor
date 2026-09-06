@@ -150,8 +150,6 @@ fun VlcPlayer(
 
     Box(
         modifier = modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
             .background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center
     ) {

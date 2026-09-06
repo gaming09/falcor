@@ -23,6 +23,11 @@
     <string name="login_error_http">Frigate returned an unexpected HTTP error. Check the URL and server logs.</string>
     <string name="login_saved_session">Restoring saved session…</string>
 
+    <!-- Nav -->
+    <string name="nav_cameras">Cameras</string>
+    <string name="nav_dashboards">Dashboards</string>
+    <string name="nav_alerts">Alerts</string>
+
     <!-- Home -->
     <string name="home_title">Cameras</string>
     <string name="home_alerts">Alerts</string>
@@ -82,11 +87,38 @@
     <string name="camera_permission_mic">Microphone permission is required for talk-back.</string>
     <string name="camera_back">Back</string>
     <string name="camera_retry">Retry</string>
+    <string name="camera_fullscreen">Fullscreen</string>
+    <string name="camera_fullscreen_exit">Exit fullscreen</string>
+    <string name="camera_toggle_detections">Toggle detection boxes</string>
+    <string name="camera_detections_on">Detections on</string>
+    <string name="camera_detections_off">Detections off</string>
 
     <!-- Authenticated media -->
     <string name="media_downloading">Downloading clip…</string>
+    <string name="media_buffering">Loading clip…</string>
     <string name="media_not_found">No recording for this time range</string>
     <string name="media_download_failed">Could not download clip. Check auth and TLS.</string>
+    <string name="media_download">Download clip</string>
+    <string name="media_play_pause">Play or pause</string>
+    <string name="media_saved">Saved to Downloads: %1$s</string>
+    <string name="media_save_failed">Could not save clip: %1$s</string>
+
+    <!-- Cast -->
+    <string name="cast_camera">Cast camera</string>
+    <string name="cast_started">Casting to connected device</string>
+    <string name="cast_failed">Cast failed. Connect a Cast device first. JWT-auth streams may not play on Chromecast — try Frigate port 5000.</string>
+
+    <!-- Dashboards -->
+    <string name="dashboards_title">Dashboards</string>
+    <string name="dashboards_create">New dashboard</string>
+    <string name="dashboards_rename">Rename dashboard</string>
+    <string name="dashboards_delete">Delete dashboard</string>
+    <string name="dashboards_edit">Edit pins / sizes</string>
+    <string name="dashboards_empty">No dashboards yet. Create one to pin cameras.</string>
+    <string name="dashboards_no_tiles">No cameras pinned. Tap edit, then pin cameras.</string>
+    <string name="dashboards_pin_hint">Edit mode: pin cameras and cycle tile size (1×1 / 2×1 / 2×2).</string>
+    <string name="dashboards_pin_camera">Pin camera</string>
+    <string name="dashboards_unpin">Unpin</string>
 
     <!-- Alerts -->
     <string name="alerts_title">Alerts</string>

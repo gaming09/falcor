@@ -14,6 +14,10 @@ securityCrypto = "1.1.0-alpha06"
 libvlc = "3.6.0"
 coil = "2.7.0"
 coroutines = "1.9.0"
+media3 = "1.5.1"
+datastore = "1.1.1"
+mediarouter = "1.7.0"
+castFramework = "21.5.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -38,6 +42,12 @@ androidx-security-crypto = { group = "androidx.security", name = "security-crypt
 libvlc-all = { group = "org.videolan.android", name = "libvlc-all", version.ref = "libvlc" }
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
+androidx-media3-datasource-okhttp = { group = "androidx.media3", name = "media3-datasource-okhttp", version.ref = "media3" }
+androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
+androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+androidx-mediarouter = { group = "androidx.mediarouter", name = "mediarouter", version.ref = "mediarouter" }
+play-services-cast-framework = { group = "com.google.android.gms", name = "play-services-cast-framework", version.ref = "castFramework" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

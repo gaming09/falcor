@@ -1,7 +1,11 @@
 package com.falcor.viewer.ui.camera
 
 import android.Manifest
+import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -27,7 +32,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material.icons.filled.ControlCamera
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -36,8 +46,8 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.CenterFocusStrong
-import androidx.compose.material.icons.filled.CenterFocusWeak
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +64,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -61,20 +72,31 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.falcor.viewer.R
+import com.falcor.viewer.cast.CastHelper
 import com.falcor.viewer.player.AuthenticatedClipPlayer
+import com.falcor.viewer.player.FrigateLiveWebView
 import com.falcor.viewer.player.OkHttpLivePreview
 import com.falcor.viewer.player.TalkWebRtcDialog
 import com.falcor.viewer.player.VlcPlayer
 import com.falcor.viewer.ui.components.ErrorRetry
+import com.falcor.viewer.ui.player.DetectionOverlay
+import com.falcor.viewer.ui.player.ZoomableBox
 import java.text.DateFormat
 import java.util.Date
 
@@ -86,17 +108,23 @@ fun CameraScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
+    val activity = context as? Activity
     val snackbarHostState = remember { SnackbarHostState() }
     val ptzWsError = stringResource(R.string.camera_ptz_ws_error)
     val ptzCmdError = stringResource(R.string.camera_ptz_command_error)
     val talkWebRtcError = stringResource(R.string.camera_talk_webrtc_failed)
     val historyNotFound = stringResource(R.string.media_not_found)
     val historyFailed = stringResource(R.string.media_download_failed)
+    val castFailed = stringResource(R.string.cast_failed)
+    val castStarted = stringResource(R.string.cast_started)
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) viewModel.setTalking(true)
     }
+
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
 
     LaunchedEffect(Unit) {
         viewModel.messages.collect { msg ->
@@ -106,7 +134,26 @@ fun CameraScreen(
                 CameraUserMessage.TalkWebRtcFailed -> snackbarHostState.showSnackbar(talkWebRtcError)
                 CameraUserMessage.HistoryNotFound -> snackbarHostState.showSnackbar(historyNotFound)
                 CameraUserMessage.HistoryDownloadFailed -> snackbarHostState.showSnackbar(historyFailed)
+                is CameraUserMessage.ClipSaved ->
+                    snackbarHostState.showSnackbar(
+                        context.getString(R.string.media_saved, msg.name)
+                    )
+                is CameraUserMessage.ClipSaveFailed ->
+                    snackbarHostState.showSnackbar(
+                        context.getString(R.string.media_save_failed, msg.message)
+                    )
+                CameraUserMessage.CastFailed -> snackbarHostState.showSnackbar(castFailed)
+                CameraUserMessage.CastStarted -> snackbarHostState.showSnackbar(castStarted)
             }
+        }
+    }
+
+    // Landscape: allow rotation; scale-to-fit handled in player ContentScale.Fit / object-fit contain
+    DisposableEffect(Unit) {
+        val prev = activity?.requestedOrientation
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+        onDispose {
+            if (prev != null) activity.requestedOrientation = prev
         }
     }
 
@@ -124,6 +171,24 @@ fun CameraScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { viewModel.setShowDetections(!state.showDetections) }) {
+                        Icon(
+                            if (state.showDetections) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                            contentDescription = stringResource(R.string.camera_toggle_detections)
+                        )
+                    }
+                    IconButton(onClick = {
+                        val ok = CastHelper.castStream(
+                            context,
+                            viewModel.castStreamUrl(),
+                            state.cameraName,
+                            if (viewModel.castStreamUrl().contains("m3u8", true))
+                                "application/x-mpegURL" else "video/x-motion-jpeg"
+                        )
+                        viewModel.notifyCast(ok)
+                    }) {
+                        Icon(Icons.Default.Cast, contentDescription = stringResource(R.string.cast_camera))
+                    }
                     if (state.ptzSupported) {
                         IconButton(onClick = viewModel::openPtzSheet) {
                             Icon(
@@ -131,6 +196,12 @@ fun CameraScreen(
                                 contentDescription = stringResource(R.string.camera_ptz_open)
                             )
                         }
+                    }
+                    IconButton(onClick = { viewModel.setFullscreen(true) }) {
+                        Icon(
+                            Icons.Default.Fullscreen,
+                            contentDescription = stringResource(R.string.camera_fullscreen)
+                        )
                     }
                 }
             )
@@ -156,34 +227,12 @@ fun CameraScreen(
                         .padding(padding)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    when {
-                        !state.authenticatedClipUrl.isNullOrBlank() -> {
-                            AuthenticatedClipPlayer(
-                                remoteUrl = state.authenticatedClipUrl,
-                                okHttpClient = viewModel.httpClient(),
-                                mute = false,
-                                onError = viewModel::onHistoryPlayError,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        state.useOkHttpPreview && state.isLive -> {
-                            OkHttpLivePreview(
-                                mjpegUrl = viewModel.mjpegLiveUrl(),
-                                snapshotUrl = viewModel.snapshotLiveUrl(),
-                                okHttpClient = viewModel.httpClient(),
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        else -> {
-                            VlcPlayer(
-                                mediaUrl = state.mediaUrl,
-                                headers = viewModel.authHeaders(),
-                                mute = true,
-                                onError = { viewModel.onStreamError() },
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    }
+                    LiveOrClipSurface(
+                        state = state,
+                        viewModel = viewModel,
+                        isLandscape = isLandscape,
+                        modifier = Modifier.fillMaxWidth()
+                    )
 
                     Row(
                         modifier = Modifier
@@ -254,13 +303,28 @@ fun CameraScreen(
                                 onClick = viewModel::openPtzSheet,
                                 label = { Text(stringResource(R.string.camera_ptz)) },
                                 leadingIcon = {
-                                    Icon(
-                                        Icons.Default.ControlCamera,
-                                        contentDescription = null
-                                    )
+                                    Icon(Icons.Default.ControlCamera, contentDescription = null)
                                 }
                             )
                         }
+                        AssistChip(
+                            onClick = { viewModel.setShowDetections(!state.showDetections) },
+                            label = {
+                                Text(
+                                    stringResource(
+                                        if (state.showDetections) R.string.camera_detections_on
+                                        else R.string.camera_detections_off
+                                    )
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    if (state.showDetections) Icons.Default.Visibility
+                                    else Icons.Default.VisibilityOff,
+                                    contentDescription = null
+                                )
+                            }
+                        )
                     }
 
                     Text(
@@ -309,6 +373,10 @@ fun CameraScreen(
         }
     }
 
+    if (state.fullscreen) {
+        FullscreenLiveDialog(state = state, viewModel = viewModel)
+    }
+
     if (state.ptzSheetOpen && state.ptzSupported) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
@@ -339,6 +407,136 @@ fun CameraScreen(
     }
 }
 
+@Composable
+private fun LiveOrClipSurface(
+    state: CameraUiState,
+    viewModel: CameraViewModel,
+    isLandscape: Boolean,
+    modifier: Modifier = Modifier,
+    fill: Boolean = false
+) {
+    val aspectMod = if (fill) {
+        modifier.fillMaxSize()
+    } else {
+        modifier
+            .fillMaxWidth()
+            .then(if (isLandscape) Modifier.height(220.dp) else Modifier.aspectRatio(16f / 9f))
+    }
+    Box(modifier = aspectMod.background(Color.Black)) {
+        ZoomableBox(modifier = Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize()) {
+                when {
+                    !state.authenticatedClipUrl.isNullOrBlank() -> {
+                        AuthenticatedClipPlayer(
+                            remoteUrl = state.authenticatedClipUrl,
+                            okHttpClient = viewModel.httpClient(),
+                            mute = false,
+                            downloadFileName = "${state.cameraName}_${state.scrubTimestamp?.toLong() ?: 0}.mp4",
+                            onError = viewModel::onHistoryPlayError,
+                            onDownloadResult = viewModel::onDownloadResult,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    state.useWebViewLive && state.isLive && state.livePageUrls.isNotEmpty() -> {
+                        FrigateLiveWebView(
+                            pageUrls = state.livePageUrls,
+                            bearerToken = viewModel.jwtTokenRaw(),
+                            fillAspect = false,
+                            showDetections = state.showDetections,
+                            onAllFailed = viewModel::onWebViewLiveFailed,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    state.useOkHttpPreview && state.isLive -> {
+                        OkHttpLivePreview(
+                            mjpegUrl = viewModel.mjpegLiveUrl(),
+                            snapshotUrl = viewModel.snapshotLiveUrl(),
+                            okHttpClient = viewModel.httpClient(),
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    else -> {
+                        VlcPlayer(
+                            mediaUrl = state.mediaUrl,
+                            headers = viewModel.authHeaders(),
+                            mute = true,
+                            onError = { viewModel.onStreamError() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
+                if (state.showDetections && state.isLive && state.authenticatedClipUrl == null) {
+                    DetectionOverlay(boxes = state.detectionBoxes)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FullscreenLiveDialog(
+    state: CameraUiState,
+    viewModel: CameraViewModel
+) {
+    val context = LocalContext.current
+    val activity = context as? Activity
+    BackHandler { viewModel.setFullscreen(false) }
+
+    DisposableEffect(Unit) {
+        val window = activity?.window
+        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+        val prevOrientation = activity?.requestedOrientation
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        controller?.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (window != null) {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+        }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (window != null) WindowCompat.setDecorFitsSystemWindows(window, true)
+            if (prevOrientation != null) activity?.requestedOrientation = prevOrientation
+        }
+    }
+
+    Dialog(
+        onDismissRequest = { viewModel.setFullscreen(false) },
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            LiveOrClipSurface(
+                state = state,
+                viewModel = viewModel,
+                isLandscape = true,
+                fill = true,
+                modifier = Modifier.fillMaxSize()
+            )
+            IconButton(
+                onClick = { viewModel.setFullscreen(false) },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    Icons.Default.FullscreenExit,
+                    contentDescription = stringResource(R.string.camera_fullscreen_exit),
+                    tint = Color.White
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun PtzControlSheet(
@@ -363,8 +561,6 @@ private fun PtzControlSheet(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
         )
-
-        // D-pad: Up / Left-Stop-Right / Down
         HoldPtzButton(
             icon = Icons.Default.KeyboardArrowUp,
             contentDescription = stringResource(R.string.camera_ptz_up),
@@ -382,7 +578,6 @@ private fun PtzControlSheet(
                 moveCommand = "MOVE_LEFT",
                 onCommand = onCommand
             )
-            // Explicit Stop (also sent on release)
             PtzTapButton(
                 icon = Icons.Default.Stop,
                 contentDescription = stringResource(R.string.camera_ptz_stop),
@@ -401,13 +596,9 @@ private fun PtzControlSheet(
             moveCommand = "MOVE_DOWN",
             onCommand = onCommand
         )
-
         if (supportsZoom) {
             Spacer(Modifier.height(16.dp))
-            Text(
-                stringResource(R.string.camera_ptz_zoom),
-                style = MaterialTheme.typography.titleSmall
-            )
+            Text(stringResource(R.string.camera_ptz_zoom), style = MaterialTheme.typography.titleSmall)
             Row(
                 horizontalArrangement = Arrangement.spacedBy(24.dp),
                 modifier = Modifier.padding(top = 8.dp)
@@ -428,13 +619,9 @@ private fun PtzControlSheet(
                 )
             }
         }
-
         if (supportsFocus) {
             Spacer(Modifier.height(16.dp))
-            Text(
-                stringResource(R.string.camera_ptz_focus),
-                style = MaterialTheme.typography.titleSmall
-            )
+            Text(stringResource(R.string.camera_ptz_focus), style = MaterialTheme.typography.titleSmall)
             Row(
                 horizontalArrangement = Arrangement.spacedBy(24.dp),
                 modifier = Modifier.padding(top = 8.dp)
@@ -455,15 +642,12 @@ private fun PtzControlSheet(
                 )
             }
         }
-
         if (presets.isNotEmpty()) {
             Spacer(Modifier.height(16.dp))
             Text(
                 stringResource(R.string.camera_ptz_presets),
                 style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
             )
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -471,22 +655,14 @@ private fun PtzControlSheet(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 presets.forEach { name ->
-                    AssistChip(
-                        onClick = { onPreset(name) },
-                        label = { Text(name) }
-                    )
+                    AssistChip(onClick = { onPreset(name) }, label = { Text(name) })
                 }
             }
         }
-
         Spacer(Modifier.height(24.dp))
     }
 }
 
-/**
- * Press-and-hold PTZ control: onPress starts MOVE_/ZOOM_/FOCUS_, onRelease sends STOP.
- * Matches Frigate web UI behavior.
- */
 @Composable
 private fun HoldPtzButton(
     icon: ImageVector,

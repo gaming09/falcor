@@ -4,9 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.falcor.viewer.data.model.CameraCapabilities
-import com.falcor.viewer.data.model.toUi
 import com.falcor.viewer.data.model.CameraUiModel
+import com.falcor.viewer.data.model.DetectionBox
 import com.falcor.viewer.data.model.RecordingSegment
+import com.falcor.viewer.data.model.toUi
+import com.falcor.viewer.data.prefs.AppPreferences
 import com.falcor.viewer.data.repo.FrigateRepository
 import com.falcor.viewer.data.ws.FrigateWsClient
 import kotlinx.coroutines.Job
@@ -30,12 +32,11 @@ data class CameraUiState(
     val mediaUrl: String? = null,
     val candidateUrls: List<String> = emptyList(),
     val candidateIndex: Int = 0,
-    /** When true, LibVLC candidates are exhausted — show OkHttp MJPEG/snapshot preview. */
+    /** LibVLC exhausted — OkHttp MJPEG/snapshot (last resort). */
     val useOkHttpPreview: Boolean = false,
-    /**
-     * When set, play this remote clip via OkHttp download → local file → VLC
-     * (history scrub / authenticated VOD).
-     */
+    /** Prefer Frigate WebView live (MSE/WebRTC). */
+    val useWebViewLive: Boolean = true,
+    val livePageUrls: List<String> = emptyList(),
     val authenticatedClipUrl: String? = null,
     val quality: StreamQuality = StreamQuality.SUB,
     val isLive: Boolean = true,
@@ -46,7 +47,6 @@ data class CameraUiState(
     val ptzSheetOpen: Boolean = false,
     val talkSupported: Boolean = false,
     val talking: Boolean = false,
-    /** WebRTC talk dialog open. */
     val talkWebRtcOpen: Boolean = false,
     val talkWebRtcUrl: String? = null,
     val talkWebRtcCandidates: List<String> = emptyList(),
@@ -57,6 +57,9 @@ data class CameraUiState(
     val historyWindowStart: Double = 0.0,
     val historyWindowEnd: Double = 0.0,
     val scrubTimestamp: Double? = null,
+    val fullscreen: Boolean = false,
+    val showDetections: Boolean = false,
+    val detectionBoxes: List<DetectionBox> = emptyList(),
     val error: Boolean = false
 )
 
@@ -66,23 +69,35 @@ sealed class CameraUserMessage {
     data object TalkWebRtcFailed : CameraUserMessage()
     data object HistoryNotFound : CameraUserMessage()
     data object HistoryDownloadFailed : CameraUserMessage()
+    data class ClipSaved(val name: String) : CameraUserMessage()
+    data class ClipSaveFailed(val message: String) : CameraUserMessage()
+    data object CastFailed : CameraUserMessage()
+    data object CastStarted : CameraUserMessage()
 }
 
 class CameraViewModel(
     private val repository: FrigateRepository,
+    private val preferences: AppPreferences,
     private val cameraName: String
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(CameraUiState(cameraName = cameraName))
     val state: StateFlow<CameraUiState> = _state.asStateFlow()
 
-    private val _messages = MutableSharedFlow<CameraUserMessage>(extraBufferCapacity = 4)
+    private val _messages = MutableSharedFlow<CameraUserMessage>(extraBufferCapacity = 8)
     val messages: SharedFlow<CameraUserMessage> = _messages.asSharedFlow()
 
     private var ptzWsAcquired = false
     private var scrubJob: Job? = null
+    private var detectionsJob: Job? = null
 
     init {
+        viewModelScope.launch {
+            preferences.showDetections.collect { show ->
+                _state.update { it.copy(showDetections = show) }
+                if (show) ensureDetectionsSubscription()
+            }
+        }
         load()
     }
 
@@ -121,17 +136,53 @@ class CameraViewModel(
                     talkSupported = caps?.showTalk == true || model.supportsAudio
                 )
             }
-            if (ptzSupported) {
-                if (!ptzWsAcquired) {
-                    repository.connectPtzWs()
-                    ptzWsAcquired = true
-                } else {
-                    repository.ensurePtzWs()
-                }
-            }
+            connectWsIfNeeded(ptzSupported || _state.value.showDetections)
             applyLiveStream()
             loadHistory()
         }
+    }
+
+    private fun connectWsIfNeeded(needed: Boolean) {
+        if (!needed) return
+        if (!ptzWsAcquired) {
+            repository.connectPtzWs()
+            ptzWsAcquired = true
+        } else {
+            repository.ensurePtzWs()
+        }
+        ensureDetectionsSubscription()
+    }
+
+    private fun ensureDetectionsSubscription() {
+        if (detectionsJob?.isActive == true) return
+        repository.ensurePtzWs()
+        if (!ptzWsAcquired) {
+            repository.connectPtzWs()
+            ptzWsAcquired = true
+        }
+        detectionsJob = viewModelScope.launch {
+            val flow = repository.detectionsFlow() ?: return@launch
+            flow.collect { event ->
+                if (event.camera.equals(cameraName, ignoreCase = true)) {
+                    _state.update { it.copy(detectionBoxes = event.boxes) }
+                }
+            }
+        }
+    }
+
+    fun setShowDetections(show: Boolean) {
+        viewModelScope.launch {
+            preferences.setShowDetections(show)
+            if (show) {
+                connectWsIfNeeded(true)
+            } else {
+                _state.update { it.copy(detectionBoxes = emptyList()) }
+            }
+        }
+    }
+
+    fun setFullscreen(open: Boolean) {
+        _state.update { it.copy(fullscreen = open) }
     }
 
     fun openPtzSheet() {
@@ -152,6 +203,7 @@ class CameraViewModel(
         val cam = _state.value.camera ?: return
         val preferSub = _state.value.quality == StreamQuality.SUB
         val urls = repository.liveStreamUrls(cameraName, preferSub, cam.streamNames)
+        val pages = repository.livePlayerPageUrls(cameraName, preferSub, cam.streamNames)
         _state.update {
             it.copy(
                 isLive = true,
@@ -162,20 +214,36 @@ class CameraViewModel(
                 candidateIndex = 0,
                 mediaUrl = urls.firstOrNull(),
                 useOkHttpPreview = false,
+                useWebViewLive = true,
+                livePageUrls = pages,
                 scrubTimestamp = null,
-                historyProgress = 1f
+                historyProgress = 1f,
+                detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
+            )
+        }
+    }
+
+    fun onWebViewLiveFailed() {
+        val s = _state.value
+        if (!s.isLive || s.authenticatedClipUrl != null) return
+        // Try LibVLC candidates next
+        _state.update {
+            it.copy(
+                useWebViewLive = false,
+                useOkHttpPreview = false,
+                mediaUrl = it.candidateUrls.firstOrNull(),
+                candidateIndex = 0
             )
         }
     }
 
     fun onStreamError() {
         val s = _state.value
-        if (s.useOkHttpPreview || s.authenticatedClipUrl != null) return
+        if (s.useOkHttpPreview || s.authenticatedClipUrl != null || s.useWebViewLive) return
         val next = s.candidateIndex + 1
         if (next < s.candidateUrls.size) {
             _state.update { it.copy(candidateIndex = next, mediaUrl = s.candidateUrls[next]) }
         } else if (s.isLive) {
-            // All LibVLC candidates failed — reliable OkHttp live preview (JWT + trusted TLS).
             _state.update { it.copy(useOkHttpPreview = true, mediaUrl = null) }
         }
     }
@@ -183,6 +251,11 @@ class CameraViewModel(
     fun mjpegLiveUrl(): String = repository.mjpegLiveUrl(cameraName)
 
     fun snapshotLiveUrl(): String = repository.thumbnailUrl(cameraName)
+
+    fun castStreamUrl(): String {
+        val preferSub = _state.value.quality == StreamQuality.SUB
+        return repository.castableStreamUrl(cameraName, preferSub)
+    }
 
     fun httpClient() = repository.authenticatedHttpClient()
 
@@ -221,7 +294,6 @@ class CameraViewModel(
         val ts = start + (end - start) * progress.coerceIn(0f, 1f)
         val clipStart = ts
         val clipEnd = (ts + 60.0).coerceAtMost(end)
-        // Prefer clip.mp4 for authenticated OkHttp download; VOD HLS is harder via file cache.
         val clip = repository.recordingPlaybackUrl(cameraName, clipStart, clipEnd)
         scrubJob?.cancel()
         scrubJob = viewModelScope.launch {
@@ -229,6 +301,7 @@ class CameraViewModel(
                 it.copy(
                     isLive = false,
                     useOkHttpPreview = false,
+                    useWebViewLive = false,
                     talking = false,
                     talkWebRtcOpen = false,
                     historyProgress = progress,
@@ -236,7 +309,8 @@ class CameraViewModel(
                     mediaUrl = null,
                     candidateUrls = emptyList(),
                     candidateIndex = 0,
-                    authenticatedClipUrl = clip
+                    authenticatedClipUrl = clip,
+                    fullscreen = false
                 )
             }
         }
@@ -248,6 +322,22 @@ class CameraViewModel(
                 kind.equals("not_found", true) -> _messages.emit(CameraUserMessage.HistoryNotFound)
                 else -> _messages.emit(CameraUserMessage.HistoryDownloadFailed)
             }
+        }
+    }
+
+    fun onDownloadResult(result: String) {
+        viewModelScope.launch {
+            if (result.startsWith("error:")) {
+                _messages.emit(CameraUserMessage.ClipSaveFailed(result.removePrefix("error:")))
+            } else {
+                _messages.emit(CameraUserMessage.ClipSaved(result))
+            }
+        }
+    }
+
+    fun notifyCast(ok: Boolean) {
+        viewModelScope.launch {
+            _messages.emit(if (ok) CameraUserMessage.CastStarted else CameraUserMessage.CastFailed)
         }
     }
 
@@ -271,9 +361,6 @@ class CameraViewModel(
         ptz("preset_$presetName")
     }
 
-    /**
-     * Two-way talk via Frigate/go2rtc WebRTC WebView — not RTSP swap.
-     */
     fun setTalking(talking: Boolean) {
         if (!talking) {
             _state.update {
@@ -329,6 +416,7 @@ class CameraViewModel(
 
     override fun onCleared() {
         scrubJob?.cancel()
+        detectionsJob?.cancel()
         if (ptzWsAcquired) {
             repository.disconnectPtzWs()
             ptzWsAcquired = false
@@ -337,11 +425,11 @@ class CameraViewModel(
     }
 
     companion object {
-        fun factory(repo: FrigateRepository, cameraName: String) =
+        fun factory(repo: FrigateRepository, prefs: AppPreferences, cameraName: String) =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T =
-                    CameraViewModel(repo, cameraName) as T
+                    CameraViewModel(repo, prefs, cameraName) as T
             }
     }
 }

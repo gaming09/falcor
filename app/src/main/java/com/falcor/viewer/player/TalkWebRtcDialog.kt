@@ -29,7 +29,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.falcor.viewer.R
-import java.net.URI
 
 /**
  * In-app WebView hosting Frigate/go2rtc WebRTC player for two-way talk.
@@ -140,19 +139,4 @@ fun TalkWebRtcDialog(
             // WebView cleanup handled when AndroidView leaves composition
         }
     }
-}
-
-private fun injectAuthCookie(pageUrl: String, cookieName: String, token: String) {
-    val uri = runCatching { URI(pageUrl) }.getOrNull() ?: return
-    val host = uri.host ?: return
-    val secure = uri.scheme.equals("https", ignoreCase = true)
-    val cookieManager = CookieManager.getInstance()
-    val base = "${uri.scheme}://$host"
-    val attrs = buildString {
-        append("$cookieName=$token; Path=/")
-        if (secure) append("; Secure")
-    }
-    cookieManager.setCookie(base, attrs)
-    cookieManager.setCookie(pageUrl, attrs)
-    cookieManager.flush()
 }
