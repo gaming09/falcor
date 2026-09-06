@@ -445,7 +445,7 @@ private fun PtzControlSheet(
 }
 
 /**
- * Press-and-hold PTZ control: onPress → MOVE_*/ZOOM_*/FOCUS_*, onRelease → STOP.
+ * Press-and-hold PTZ control: onPress starts MOVE_/ZOOM_/FOCUS_, onRelease sends STOP.
  * Matches Frigate web UI behavior.
  */
 @Composable
