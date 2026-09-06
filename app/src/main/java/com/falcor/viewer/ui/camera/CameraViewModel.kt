@@ -6,8 +6,12 @@ import androidx.lifecycle.viewModelScope
 import com.falcor.viewer.data.model.CameraUiModel
 import com.falcor.viewer.data.model.RecordingSegment
 import com.falcor.viewer.data.repo.FrigateRepository
+import com.falcor.viewer.data.ws.FrigateWsClient
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -25,16 +29,24 @@ data class CameraUiState(
     val quality: StreamQuality = StreamQuality.SUB,
     val isLive: Boolean = true,
     val ptzSupported: Boolean = false,
+    val ptzSupportsZoom: Boolean = true,
+    val ptzSupportsFocus: Boolean = false,
+    val ptzPresets: List<String> = emptyList(),
+    val ptzSheetOpen: Boolean = false,
     val talkSupported: Boolean = false,
     val talking: Boolean = false,
     val recordings: List<RecordingSegment> = emptyList(),
     val historyLoading: Boolean = false,
-    val historyProgress: Float = 1f, // 1f = live end
+    val historyProgress: Float = 1f,
     val historyWindowStart: Double = 0.0,
     val historyWindowEnd: Double = 0.0,
     val scrubTimestamp: Double? = null,
     val error: Boolean = false
 )
+
+sealed class CameraUserMessage {
+    data object PtzWsFailed : CameraUserMessage()
+}
 
 class CameraViewModel(
     private val repository: FrigateRepository,
@@ -43,6 +55,11 @@ class CameraViewModel(
 
     private val _state = MutableStateFlow(CameraUiState(cameraName = cameraName))
     val state: StateFlow<CameraUiState> = _state.asStateFlow()
+
+    private val _messages = MutableSharedFlow<CameraUserMessage>(extraBufferCapacity = 1)
+    val messages: SharedFlow<CameraUserMessage> = _messages.asSharedFlow()
+
+    private var ptzWsAcquired = false
 
     init {
         load()
@@ -53,8 +70,9 @@ class CameraViewModel(
             _state.update { it.copy(loading = true, error = false) }
             val cameras = repository.getCameras()
             val cam = cameras.getOrNull()?.find { it.name == cameraName }
-            val ptz = repository.getPtzInfo(cameraName).getOrNull()?.isSupported == true ||
-                cam?.supportsPtz == true
+            val ptzInfo = repository.getPtzInfo(cameraName).getOrNull()
+            val configHint = cam?.supportsPtz == true
+            val ptzSupported = ptzInfo?.isSupported == true || configHint
             if (cam == null && cameras.isFailure) {
                 _state.update { it.copy(loading = false, error = true) }
                 return@launch
@@ -62,7 +80,7 @@ class CameraViewModel(
             val model = cam ?: CameraUiModel(
                 name = cameraName,
                 enabled = true,
-                supportsPtz = ptz,
+                supportsPtz = ptzSupported,
                 supportsAudio = false,
                 streamNames = listOf(cameraName),
                 thumbnailUrl = repository.thumbnailUrl(cameraName)
@@ -71,13 +89,33 @@ class CameraViewModel(
                 it.copy(
                     camera = model,
                     loading = false,
-                    ptzSupported = ptz,
+                    ptzSupported = ptzSupported,
+                    ptzSupportsZoom = ptzInfo?.supportsZoom != false,
+                    ptzSupportsFocus = ptzInfo?.supportsFocus == true,
+                    ptzPresets = ptzInfo?.presets.orEmpty(),
                     talkSupported = model.supportsAudio
                 )
+            }
+            if (ptzSupported) {
+                if (!ptzWsAcquired) {
+                    repository.connectPtzWs()
+                    ptzWsAcquired = true
+                } else {
+                    repository.ensurePtzWs()
+                }
             }
             applyLiveStream()
             loadHistory()
         }
+    }
+
+    fun openPtzSheet() {
+        _state.update { it.copy(ptzSheetOpen = true) }
+        repository.ensurePtzWs()
+    }
+
+    fun closePtzSheet() {
+        _state.update { it.copy(ptzSheetOpen = false) }
     }
 
     fun setQuality(quality: StreamQuality) {
@@ -132,10 +170,6 @@ class CameraViewModel(
         }
     }
 
-    /**
-     * Scrub history slider: progress 0..1 maps across the loaded recording window.
-     * Seeks VLC by swapping media to a Frigate clip/VOD URL around that timestamp.
-     */
     fun onHistoryScrub(progress: Float) {
         val s = _state.value
         val start = s.historyWindowStart
@@ -164,14 +198,24 @@ class CameraViewModel(
 
     fun ptz(command: String) {
         viewModelScope.launch {
-            repository.ptz(cameraName, command)
+            val result = repository.ptz(cameraName, command)
+            if (result.isFailure) {
+                val msg = result.exceptionOrNull()?.message.orEmpty()
+                if (msg.contains("WebSocket", ignoreCase = true) ||
+                    repository.ptzWsState()?.value == FrigateWsClient.ConnectionState.FAILED
+                ) {
+                    _messages.emit(CameraUserMessage.PtzWsFailed)
+                }
+            }
         }
+    }
+
+    fun ptzPreset(presetName: String) {
+        ptz("preset_$presetName")
     }
 
     fun setTalking(talking: Boolean) {
         _state.update { it.copy(talking = talking) }
-        // Two-way audio over RTSP backchannel / go2rtc typically needs WebRTC.
-        // Falcor enables mic capture UI; LibVLC talk-back is best-effort via unmute + backchannel stream.
         if (talking) {
             val cam = _state.value.camera ?: return
             val talkName = repository.talkStreamName(cam.streamNames, cameraName) ?: cameraName
@@ -184,6 +228,14 @@ class CameraViewModel(
     }
 
     fun authHeaders(): Map<String, String> = repository.authHeaders()
+
+    override fun onCleared() {
+        if (ptzWsAcquired) {
+            repository.disconnectPtzWs()
+            ptzWsAcquired = false
+        }
+        super.onCleared()
+    }
 
     companion object {
         fun factory(repo: FrigateRepository, cameraName: String) =

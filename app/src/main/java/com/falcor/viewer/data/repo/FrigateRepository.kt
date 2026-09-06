@@ -10,12 +10,14 @@ import com.falcor.viewer.data.model.PtzInfo
 import com.falcor.viewer.data.model.RecordingSegment
 import com.falcor.viewer.data.model.toUi
 import com.falcor.viewer.data.prefs.SecureCredentialStore
+import com.falcor.viewer.data.ws.FrigateWsClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.net.URI
+import java.util.concurrent.atomic.AtomicInteger
 
 class FrigateRepository(
     private val credentialStore: SecureCredentialStore
@@ -25,6 +27,10 @@ class FrigateRepository(
 
     private val _sessionReady = MutableStateFlow(false)
     val sessionReady: StateFlow<Boolean> = _sessionReady.asStateFlow()
+
+    @Volatile
+    private var wsClient: FrigateWsClient? = null
+    private val wsRefCount = AtomicInteger(0)
 
     val credentials: SecureCredentialStore.Credentials?
         get() = credentialStore.load()
@@ -57,6 +63,7 @@ class FrigateRepository(
         }
 
     fun logout() {
+        disconnectPtzWs(force = true)
         credentialStore.clear()
         api = null
         cachedConfig = null
@@ -97,7 +104,6 @@ class FrigateRepository(
                 if (!response.isSuccessful) {
                     error("Enable/disable failed: HTTP ${response.code()}")
                 }
-                // Refresh cached config best-effort
                 runCatching { refreshConfig() }
                 Unit
             }
@@ -134,13 +140,93 @@ class FrigateRepository(
         runCatching { requireApi().getPtzInfo(camera) }
     }
 
+    /**
+     * Acquire + connect the Frigate WebSocket used for PTZ (same as the official web UI).
+     * Reference-counted so multiple camera screens can share one socket.
+     */
+    fun connectPtzWs() {
+        val creds = credentials ?: return
+        synchronized(this) {
+            wsRefCount.incrementAndGet()
+            ensurePtzWsLocked(creds)
+        }
+    }
+
+    /** Reconnect if needed without bumping the refcount. */
+    fun ensurePtzWs() {
+        val creds = credentials ?: return
+        synchronized(this) {
+            if (wsRefCount.get() <= 0) wsRefCount.set(1)
+            ensurePtzWsLocked(creds)
+        }
+    }
+
+    private fun ensurePtzWsLocked(creds: SecureCredentialStore.Credentials) {
+        val existing = wsClient
+        if (existing == null ||
+            existing.state.value == FrigateWsClient.ConnectionState.FAILED
+        ) {
+            existing?.disconnect()
+            val client = FrigateWsClient(creds)
+            wsClient = client
+            client.connect()
+            return
+        }
+        if (existing.state.value == FrigateWsClient.ConnectionState.DISCONNECTED) {
+            existing.connect()
+        }
+    }
+
+    fun disconnectPtzWs(force: Boolean = false) {
+        synchronized(this) {
+            if (force) {
+                wsRefCount.set(0)
+                wsClient?.disconnect()
+                wsClient = null
+                return
+            }
+            val remaining = wsRefCount.decrementAndGet().coerceAtLeast(0)
+            if (remaining == 0) {
+                wsClient?.disconnect()
+                wsClient = null
+            }
+        }
+    }
+
+    fun ptzWsState(): StateFlow<FrigateWsClient.ConnectionState>? = wsClient?.state
+
+    /**
+     * Send a PTZ command via Frigate WebSocket (primary path used by the web UI).
+     * Falls back to legacy HTTP GET /api/{cam}/ptz/{cmd} only if the socket is unavailable.
+     */
     suspend fun ptz(camera: String, command: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
-            val response = requireApi().ptzCommand(camera, command)
-            // Treat 404 as unsupported rather than hard failure for callers that hide controls.
-            if (!response.isSuccessful && response.code() != 404) {
-                error("PTZ command failed: HTTP ${response.code()}")
+            ensureWsConnected()
+            val ws = wsClient
+            if (ws != null && ws.sendPtz(camera, command)) {
+                return@runCatching
             }
+            // Last-resort HTTP fallback (not Frigate's primary mechanism).
+            val response = runCatching { requireApi().ptzCommand(camera, command) }.getOrNull()
+            if (response != null && response.isSuccessful) {
+                return@runCatching
+            }
+            if (ws?.state?.value != FrigateWsClient.ConnectionState.CONNECTED) {
+                error("PTZ WebSocket unavailable")
+            }
+            error("PTZ command failed: HTTP ${response?.code() ?: "no response"}")
+        }
+    }
+
+    private fun ensureWsConnected() {
+        ensurePtzWs()
+        // Brief wait for handshake so the first press isn't dropped.
+        val deadline = System.currentTimeMillis() + 2_000
+        while (System.currentTimeMillis() < deadline) {
+            val s = wsClient?.state?.value
+            if (s == FrigateWsClient.ConnectionState.CONNECTED) return
+            if (s == FrigateWsClient.ConnectionState.FAILED) return
+            Thread.sleep(50)
         }
     }
 
@@ -170,9 +256,8 @@ class FrigateRepository(
             add("rtsp://$host:8554/$preferred")
             if (alt != null) add("rtsp://$host:8554/$alt")
             if (preferred != camera) add("rtsp://$host:8554/$camera")
-            // go2rtc HTTP-FLV / MSE-ish endpoints some setups expose
             add("$schemeHost/live/$preferred/index.m3u8")
-            add("$schemeHost/api/$camera") // MJPEG multipart
+            add("$schemeHost/api/$camera")
         }.distinct()
     }
 
@@ -180,14 +265,10 @@ class FrigateRepository(
         return streamNames.firstOrNull {
             it.contains("talk", true) || it.contains("twoway", true) || it.contains("two_way", true)
         } ?: streamNames.firstOrNull()?.takeIf {
-            // go2rtc backchannel may exist on primary stream; UI still offers talk when audio flagged
             true
         }?.let { camera }
     }
 
-    /**
-     * Recording playback via Frigate clip endpoint for a window around [timestamp].
-     */
     fun recordingPlaybackUrl(camera: String, startTs: Double, endTs: Double): String =
         "$baseUrl/api/$camera/start/$startTs/end/$endTs/clip.mp4"
 

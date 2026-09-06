@@ -10,7 +10,7 @@ Package ID: `com.falcor.viewer`
 - **Camera grid** — cameras from `GET /api/config`, with enable/disable toggles via Frigate’s runtime camera API (`PUT /api/camera/{name}/set/enabled`).
 - **LibVLC streaming** — live RTSP (go2rtc restream on port **8554**) with main/sub stream switching, plus recording playback via Frigate VOD/clip URLs.
 - **Two-way audio** — talk UI when the camera/config suggests audio support; requests `RECORD_AUDIO` and switches to a talk-capable go2rtc stream when possible. Hidden/disabled gracefully otherwise.
-- **PTZ** — on-screen pad when Frigate reports PTZ (`/api/{camera}/ptz/info`); sends move commands best-effort over HTTP (`/api/{camera}/ptz/{MOVE_*|STOP|ZOOM_*}`). Controls hide when unsupported.
+- **PTZ** — toolbar / chip button opens a dedicated bottom-sheet D-pad when Frigate reports PTZ (`/api/{camera}/ptz/info` or ONVIF in config). Commands use the same **WebSocket** path as the official Frigate web UI (`ws(s)://<host>/ws`, topic `{camera}/ptz`). Press-and-hold sends `MOVE_*` / `ZOOM_*` / `FOCUS_*`; release sends `STOP`. Presets listed from ptz/info. Controls hide when unsupported.
 - **History scrubber** — recordings from `/api/{camera}/recordings`; scrubbing seeks the VLC player using Frigate VOD/clip endpoints.
 - **Alerts** — events from `/api/events` with camera/label/clip/snapshot filters; open snapshot or clip in a review screen.
 - **Dark Material 3 UI** — Jetpack Compose, fully localized English strings in `res/values/strings.xml`.
@@ -102,7 +102,7 @@ Credentials are encrypted on-device and restored automatically.
 ```text
 app/src/main/java/com/falcor/viewer/
   FalcorApp.kt, MainActivity.kt
-  data/          # Retrofit API, models, repository, secure prefs
+  data/          # Retrofit API, models, repository, secure prefs, Frigate WebSocket client
   player/        # LibVLC Compose AndroidView
   ui/            # theme, login, home, camera, alerts, navigation
 ```
@@ -116,11 +116,24 @@ app/src/main/java/com/falcor/viewer/
 | Events | `GET /api/events` |
 | Recordings | `GET /api/{cam}/recordings` |
 | PTZ info | `GET /api/{cam}/ptz/info` |
-| PTZ move | `GET /api/{cam}/ptz/{command}` (best-effort; MQTT is Frigate’s primary PTZ path) |
+| PTZ move | WebSocket `ws(s)://<base>/ws` — JSON `{"topic":"{cam}/ptz","payload":"MOVE_LEFT","retain":false}` (same as Frigate web UI); HTTP `GET /api/{cam}/ptz/{command}` is last-resort fallback only |
 | Live | go2rtc `rtsp://host:8554/...` |
 | Event media | `/api/events/{id}/snapshot.jpg`, `/clip.mp4` |
 
 Falcor degrades gracefully when an endpoint is missing or returns 404 (e.g. PTZ or talk on cameras that do not support them).
+
+
+## PTZ (WebSocket)
+
+Falcor mirrors the Frigate web UI for pan/tilt/zoom:
+
+1. Derive the socket URL from the saved HTTP base: `http`→`ws`, `https`→`wss`, then append `/ws`  
+   (e.g. `http://192.168.1.10:5000/` → `ws://192.168.1.10:5000/ws`).
+2. After `OPEN`, send `{ "topic": "onConnect", "message": "", "retain": false }`.
+3. Commands: `{ "topic": "<camera>/ptz", "payload": "<CMD>", "retain": false }` where `<CMD>` is  
+   `MOVE_UP` / `MOVE_DOWN` / `MOVE_LEFT` / `MOVE_RIGHT` / `ZOOM_IN` / `ZOOM_OUT` / `FOCUS_IN` / `FOCUS_OUT` / `STOP` / `preset_<name>`.
+4. Auth: the same `Authorization` header used for HTTP (Bearer JWT or Basic) is attached to the WebSocket handshake.
+5. Feature detection still uses `GET /api/{camera}/ptz/info` (features + presets). The camera screen shows a **PTZ** action in the top app bar; tapping opens a modal bottom sheet with press-and-hold controls.
 
 ## License
 

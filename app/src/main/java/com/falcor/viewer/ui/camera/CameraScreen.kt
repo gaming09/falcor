@@ -5,14 +5,20 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -21,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ControlCamera
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -29,6 +36,8 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.CenterFocusWeak
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -36,18 +45,28 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.falcor.viewer.R
@@ -56,7 +75,7 @@ import com.falcor.viewer.ui.components.ErrorRetry
 import java.text.DateFormat
 import java.util.Date
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CameraScreen(
     viewModel: CameraViewModel,
@@ -64,13 +83,26 @@ fun CameraScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    val ptzWsError = stringResource(R.string.camera_ptz_ws_error)
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) viewModel.setTalking(true)
     }
 
+    LaunchedEffect(Unit) {
+        viewModel.messages.collect { msg ->
+            when (msg) {
+                CameraUserMessage.PtzWsFailed -> {
+                    snackbarHostState.showSnackbar(ptzWsError)
+                }
+            }
+        }
+    }
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = { Text(state.cameraName) },
@@ -80,6 +112,16 @@ fun CameraScreen(
                             Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = stringResource(R.string.camera_back)
                         )
+                    }
+                },
+                actions = {
+                    if (state.ptzSupported) {
+                        IconButton(onClick = viewModel::openPtzSheet) {
+                            Icon(
+                                Icons.Default.ControlCamera,
+                                contentDescription = stringResource(R.string.camera_ptz_open)
+                            )
+                        }
                     }
                 }
             )
@@ -136,12 +178,12 @@ fun CameraScreen(
                         )
                     }
 
-                    // Talk-back
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         if (state.talkSupported) {
                             AssistChip(
@@ -177,27 +219,23 @@ fun CameraScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        if (state.ptzSupported) {
+                            AssistChip(
+                                onClick = viewModel::openPtzSheet,
+                                label = { Text(stringResource(R.string.camera_ptz)) },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.ControlCamera,
+                                        contentDescription = null
+                                    )
+                                }
+                            )
+                        }
                     }
 
-                    // PTZ pad
-                    if (state.ptzSupported) {
-                        Text(
-                            stringResource(R.string.camera_ptz),
-                            modifier = Modifier.padding(start = 16.dp, top = 16.dp),
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        PtzPad(
-                            onCommand = viewModel::ptz,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp)
-                        )
-                    }
-
-                    // History scrubber
                     Text(
                         stringResource(R.string.camera_history),
-                        modifier = Modifier.padding(start = 16.dp, top = 8.dp),
+                        modifier = Modifier.padding(start = 16.dp, top = 16.dp),
                         style = MaterialTheme.typography.titleMedium
                     )
                     if (state.historyLoading) {
@@ -240,56 +278,228 @@ fun CameraScreen(
             }
         }
     }
-}
 
-@Composable
-private fun PtzPad(
-    onCommand: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
-        PtzButton(Icons.Default.KeyboardArrowUp, stringResource(R.string.camera_ptz_up)) {
-            onCommand("MOVE_UP")
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            PtzButton(Icons.Default.KeyboardArrowLeft, stringResource(R.string.camera_ptz_left)) {
-                onCommand("MOVE_LEFT")
-            }
-            PtzButton(Icons.Default.Stop, stringResource(R.string.camera_ptz_stop)) {
-                onCommand("STOP")
-            }
-            PtzButton(Icons.Default.KeyboardArrowRight, stringResource(R.string.camera_ptz_right)) {
-                onCommand("MOVE_RIGHT")
-            }
-        }
-        PtzButton(Icons.Default.KeyboardArrowDown, stringResource(R.string.camera_ptz_down)) {
-            onCommand("MOVE_DOWN")
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            PtzButton(Icons.Default.Add, stringResource(R.string.camera_ptz_zoom_in)) {
-                onCommand("ZOOM_IN")
-            }
-            PtzButton(Icons.Default.Remove, stringResource(R.string.camera_ptz_zoom_out)) {
-                onCommand("ZOOM_OUT")
-            }
+    if (state.ptzSheetOpen && state.ptzSupported) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = viewModel::closePtzSheet,
+            sheetState = sheetState
+        ) {
+            PtzControlSheet(
+                supportsZoom = state.ptzSupportsZoom,
+                supportsFocus = state.ptzSupportsFocus,
+                presets = state.ptzPresets,
+                onCommand = viewModel::ptz,
+                onPreset = viewModel::ptzPreset,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            )
         }
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun PtzButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+private fun PtzControlSheet(
+    supportsZoom: Boolean,
+    supportsFocus: Boolean,
+    presets: List<String>,
+    onCommand: (String) -> Unit,
+    onPreset: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            stringResource(R.string.camera_ptz_sheet_title),
+            style = MaterialTheme.typography.titleLarge
+        )
+        Text(
+            stringResource(R.string.camera_ptz_hold_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
+        )
+
+        // D-pad: Up / Left-Stop-Right / Down
+        HoldPtzButton(
+            icon = Icons.Default.KeyboardArrowUp,
+            contentDescription = stringResource(R.string.camera_ptz_up),
+            moveCommand = "MOVE_UP",
+            onCommand = onCommand
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(vertical = 8.dp)
+        ) {
+            HoldPtzButton(
+                icon = Icons.Default.KeyboardArrowLeft,
+                contentDescription = stringResource(R.string.camera_ptz_left),
+                moveCommand = "MOVE_LEFT",
+                onCommand = onCommand
+            )
+            // Explicit Stop (also sent on release)
+            PtzTapButton(
+                icon = Icons.Default.Stop,
+                contentDescription = stringResource(R.string.camera_ptz_stop),
+                onClick = { onCommand("STOP") }
+            )
+            HoldPtzButton(
+                icon = Icons.Default.KeyboardArrowRight,
+                contentDescription = stringResource(R.string.camera_ptz_right),
+                moveCommand = "MOVE_RIGHT",
+                onCommand = onCommand
+            )
+        }
+        HoldPtzButton(
+            icon = Icons.Default.KeyboardArrowDown,
+            contentDescription = stringResource(R.string.camera_ptz_down),
+            moveCommand = "MOVE_DOWN",
+            onCommand = onCommand
+        )
+
+        if (supportsZoom) {
+            Spacer(Modifier.height(16.dp))
+            Text(
+                stringResource(R.string.camera_ptz_zoom),
+                style = MaterialTheme.typography.titleSmall
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                modifier = Modifier.padding(top = 8.dp)
+            ) {
+                HoldPtzButton(
+                    icon = Icons.Default.Add,
+                    contentDescription = stringResource(R.string.camera_ptz_zoom_in),
+                    moveCommand = "ZOOM_IN",
+                    onCommand = onCommand,
+                    size = 56.dp
+                )
+                HoldPtzButton(
+                    icon = Icons.Default.Remove,
+                    contentDescription = stringResource(R.string.camera_ptz_zoom_out),
+                    moveCommand = "ZOOM_OUT",
+                    onCommand = onCommand,
+                    size = 56.dp
+                )
+            }
+        }
+
+        if (supportsFocus) {
+            Spacer(Modifier.height(16.dp))
+            Text(
+                stringResource(R.string.camera_ptz_focus),
+                style = MaterialTheme.typography.titleSmall
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                modifier = Modifier.padding(top = 8.dp)
+            ) {
+                HoldPtzButton(
+                    icon = Icons.Default.CenterFocusStrong,
+                    contentDescription = stringResource(R.string.camera_ptz_focus_in),
+                    moveCommand = "FOCUS_IN",
+                    onCommand = onCommand,
+                    size = 56.dp
+                )
+                HoldPtzButton(
+                    icon = Icons.Default.CenterFocusWeak,
+                    contentDescription = stringResource(R.string.camera_ptz_focus_out),
+                    moveCommand = "FOCUS_OUT",
+                    onCommand = onCommand,
+                    size = 56.dp
+                )
+            }
+        }
+
+        if (presets.isNotEmpty()) {
+            Spacer(Modifier.height(16.dp))
+            Text(
+                stringResource(R.string.camera_ptz_presets),
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                presets.forEach { name ->
+                    AssistChip(
+                        onClick = { onPreset(name) },
+                        label = { Text(name) }
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * Press-and-hold PTZ control: onPress → MOVE_*/ZOOM_*/FOCUS_*, onRelease → STOP.
+ * Matches Frigate web UI behavior.
+ */
+@Composable
+private fun HoldPtzButton(
+    icon: ImageVector,
     contentDescription: String,
-    onClick: () -> Unit
+    moveCommand: String,
+    onCommand: (String) -> Unit,
+    size: androidx.compose.ui.unit.Dp = 64.dp
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primaryContainer)
+            .semantics { this.contentDescription = contentDescription }
+            .pointerInput(moveCommand) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    onCommand(moveCommand)
+                    waitForUpOrCancellation()
+                    onCommand("STOP")
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            modifier = Modifier.size(size * 0.5f)
+        )
+    }
+}
+
+@Composable
+private fun PtzTapButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    size: androidx.compose.ui.unit.Dp = 64.dp
 ) {
     IconButton(
         onClick = onClick,
         modifier = Modifier
-            .size(52.dp)
+            .size(size)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer)
+            .background(MaterialTheme.colorScheme.secondaryContainer)
     ) {
-        Icon(icon, contentDescription = contentDescription, tint = MaterialTheme.colorScheme.onPrimaryContainer)
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.size(size * 0.45f)
+        )
     }
 }

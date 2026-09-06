@@ -121,13 +121,21 @@ data class PtzInfo(
     val presets: List<String> = emptyList()
 ) {
     val isSupported: Boolean
-        get() = features?.pt != null || features?.zoom != null || presets.isNotEmpty()
+        get() = features?.pt != null ||
+            features?.zoom != null ||
+            features?.focus != null ||
+            presets.isNotEmpty()
+
+    val supportsPanTilt: Boolean get() = features?.pt != null
+    val supportsZoom: Boolean get() = features?.zoom != null
+    val supportsFocus: Boolean get() = features?.focus != null
 }
 
 @Serializable
 data class PtzFeatures(
     val pt: String? = null,
     val zoom: String? = null,
+    val focus: String? = null,
     val presets: Boolean? = null
 )
 

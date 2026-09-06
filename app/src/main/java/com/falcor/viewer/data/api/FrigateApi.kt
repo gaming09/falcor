@@ -65,9 +65,9 @@ interface FrigateApi {
     suspend fun getPtzInfo(@Path("camera") camera: String): PtzInfo
 
     /**
-     * Best-effort PTZ move. Older/community docs expose GET /api/{camera}/ptz/{command}
-     * with commands like MOVE_LEFT, MOVE_RIGHT, MOVE_UP, MOVE_DOWN, ZOOM_IN, ZOOM_OUT, STOP.
-     * Frigate primarily documents MQTT PTZ; this HTTP route is attempted and failures are ignored gracefully.
+     * Legacy HTTP PTZ move (last-resort fallback only).
+     * Primary PTZ path is Frigate WebSocket: topic "{camera}/ptz", payload MOVE_* / STOP / ZOOM_* .
+     * Prefer [com.falcor.viewer.data.ws.FrigateWsClient].
      */
     @GET("{camera}/ptz/{command}")
     suspend fun ptzCommand(
