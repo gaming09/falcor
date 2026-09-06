@@ -15,6 +15,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,6 +30,10 @@ import org.videolan.libvlc.util.VLCVideoLayout
 
 /**
  * LibVLC Compose wrapper for live RTSP/HTTP and recording playback.
+ *
+ * Auth: passes `Authorization: Bearer` via `:http-header=` (not `:http-password=`).
+ * TLS: best-effort GnuTLS / cert options for self-signed Frigate; HTTPS+JWT streams
+ * may still fail — CameraScreen falls back to [OkHttpLivePreview].
  */
 @Composable
 fun VlcPlayer(
@@ -43,6 +48,9 @@ fun VlcPlayer(
     val context = LocalContext.current
     var isBuffering by remember { mutableStateOf(true) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    val onErrorState by rememberUpdatedState(onError)
+    val onPlayingState by rememberUpdatedState(onPlaying)
+    val headersState by rememberUpdatedState(headers)
 
     val libVlc = remember {
         LibVLC(
@@ -54,6 +62,8 @@ fun VlcPlayer(
                 "--file-caching=300",
                 "--sout-mux-caching=300",
                 "--avcodec-hw=any",
+                // LibVLC 3.6 on Android has no reliable "skip TLS verify" for self-signed
+                // Frigate certs; CameraScreen falls back to OkHttpLivePreview when HTTPS fails.
                 "-vvv"
             )
         )
@@ -69,6 +79,32 @@ fun VlcPlayer(
         }
     }
 
+    DisposableEffect(mediaPlayer) {
+        val listener = MediaPlayer.EventListener { event ->
+            when (event.type) {
+                MediaPlayer.Event.Buffering -> {
+                    isBuffering = event.buffering < 100f
+                }
+                MediaPlayer.Event.Playing -> {
+                    isBuffering = false
+                    errorText = null
+                    onPlayingState?.invoke()
+                }
+                MediaPlayer.Event.EncounteredError -> {
+                    isBuffering = false
+                    errorText = "stream_error"
+                    onErrorState?.invoke("stream_error")
+                }
+                MediaPlayer.Event.EndReached -> {
+                    isBuffering = false
+                }
+            }
+        }
+        mediaPlayer.setEventListener(listener)
+        onDispose { mediaPlayer.setEventListener(null) }
+    }
+
+    // Re-run whenever the candidate URL changes so fallback advances.
     LaunchedEffect(mediaUrl, playWhenReady, mute) {
         errorText = null
         isBuffering = true
@@ -79,15 +115,27 @@ fun VlcPlayer(
         }
         try {
             val media = Media(libVlc, android.net.Uri.parse(mediaUrl))
-            headers.forEach { (k, v) ->
-                // LibVLC HTTP headers via option
-                media.addOption(":http-user-agent=Falcor/1.0")
-                if (k.equals("Authorization", true)) {
-                    media.addOption(":http-password=${v.removePrefix("Bearer ").trim()}")
-                    // Also pass as custom header when supported
-                    media.addOption(":http-extra-headers=$k: $v")
+            media.addOption(":network-caching=300")
+            media.addOption(":rtsp-tcp")
+            media.addOption(":http-reconnect=true")
+            media.addOption(":http-user-agent=Falcor/1.0")
+
+            val hdrs = headersState
+            val auth = hdrs.entries.firstOrNull { it.key.equals("Authorization", true) }?.value
+            if (!auth.isNullOrBlank()) {
+                // Correct JWT auth for LibVLC HTTP(S) — NOT :http-password=
+                media.addOption(":http-header=Authorization: $auth")
+                val token = auth.removePrefix("Bearer ").removePrefix("bearer ").trim()
+                if (token.isNotEmpty()) {
+                    media.addOption(":http-header=Cookie: frigate_token=$token")
                 }
             }
+            hdrs.forEach { (k, v) ->
+                if (!k.equals("Authorization", true) && v.isNotBlank()) {
+                    media.addOption(":http-header=$k: $v")
+                }
+            }
+
             media.setHWDecoderEnabled(true, false)
             mediaPlayer.media = media
             media.release()
@@ -96,33 +144,8 @@ fun VlcPlayer(
         } catch (t: Throwable) {
             errorText = t.message
             isBuffering = false
-            onError?.invoke(t.message ?: "error")
+            onErrorState?.invoke(t.message ?: "error")
         }
-    }
-
-    DisposableEffect(mediaPlayer) {
-        val listener = MediaPlayer.EventListener { event ->
-            when (event.type) {
-                MediaPlayer.Event.Buffering -> {
-                    isBuffering = event.buffering < 100f
-                }
-                MediaPlayer.Event.Playing -> {
-                    isBuffering = false
-                    errorText = null
-                    onPlaying?.invoke()
-                }
-                MediaPlayer.Event.EncounteredError -> {
-                    isBuffering = false
-                    errorText = "stream_error"
-                    onError?.invoke("stream_error")
-                }
-                MediaPlayer.Event.EndReached -> {
-                    isBuffering = false
-                }
-            }
-        }
-        mediaPlayer.setEventListener(listener)
-        onDispose { mediaPlayer.setEventListener(null) }
     }
 
     Box(

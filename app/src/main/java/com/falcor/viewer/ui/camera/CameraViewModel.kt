@@ -26,6 +26,8 @@ data class CameraUiState(
     val mediaUrl: String? = null,
     val candidateUrls: List<String> = emptyList(),
     val candidateIndex: Int = 0,
+    /** When true, LibVLC candidates are exhausted — show OkHttp MJPEG/snapshot preview. */
+    val useOkHttpPreview: Boolean = false,
     val quality: StreamQuality = StreamQuality.SUB,
     val isLive: Boolean = true,
     val ptzSupported: Boolean = false,
@@ -68,6 +70,7 @@ class CameraViewModel(
     fun load() {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = false) }
+            repository.ensureConfig()
             val cameras = repository.getCameras()
             val cam = cameras.getOrNull()?.find { it.name == cameraName }
             val ptzInfo = repository.getPtzInfo(cameraName).getOrNull()
@@ -133,6 +136,7 @@ class CameraViewModel(
                 candidateUrls = urls,
                 candidateIndex = 0,
                 mediaUrl = urls.firstOrNull(),
+                useOkHttpPreview = false,
                 scrubTimestamp = null,
                 historyProgress = 1f
             )
@@ -141,11 +145,21 @@ class CameraViewModel(
 
     fun onStreamError() {
         val s = _state.value
+        if (s.useOkHttpPreview) return
         val next = s.candidateIndex + 1
         if (next < s.candidateUrls.size) {
             _state.update { it.copy(candidateIndex = next, mediaUrl = s.candidateUrls[next]) }
+        } else if (s.isLive) {
+            // All LibVLC candidates failed — reliable OkHttp live preview (JWT + trusted TLS).
+            _state.update { it.copy(useOkHttpPreview = true, mediaUrl = null) }
         }
     }
+
+    fun mjpegLiveUrl(): String = repository.mjpegLiveUrl(cameraName)
+
+    fun snapshotLiveUrl(): String = repository.thumbnailUrl(cameraName)
+
+    fun httpClient() = repository.authenticatedHttpClient()
 
     fun jumpToLive() = applyLiveStream()
 
@@ -187,6 +201,7 @@ class CameraViewModel(
         _state.update {
             it.copy(
                 isLive = false,
+                useOkHttpPreview = false,
                 historyProgress = progress,
                 scrubTimestamp = ts,
                 candidateUrls = listOf(vod, clip),
@@ -219,9 +234,22 @@ class CameraViewModel(
         if (talking) {
             val cam = _state.value.camera ?: return
             val talkName = repository.talkStreamName(cam.streamNames, cameraName) ?: cameraName
-            val host = runCatching { java.net.URI(repository.baseUrl).host }.getOrNull() ?: return
-            val talkUrl = "rtsp://$host:8554/$talkName"
-            _state.update { it.copy(mediaUrl = talkUrl, isLive = true) }
+            val talkUrl = repository.rtspUrlForStream(talkName)
+            if (talkUrl != null) {
+                _state.update {
+                    it.copy(
+                        mediaUrl = talkUrl,
+                        isLive = true,
+                        useOkHttpPreview = false,
+                        candidateUrls = listOf(talkUrl),
+                        candidateIndex = 0
+                    )
+                }
+            } else {
+                // No RTSP in config — keep HTTPS live candidates / OkHttp preview
+                applyLiveStream()
+                _state.update { it.copy(talking = true) }
+            }
         } else if (_state.value.isLive) {
             applyLiveStream()
         }

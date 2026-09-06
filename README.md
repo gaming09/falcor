@@ -8,7 +8,7 @@ Package ID: `com.falcor.viewer`
 
 - **Persistent login** — Frigate base URL plus username/password (`POST /api/login` → JWT) or pasted Bearer token, stored in `EncryptedSharedPreferences`. Session restores on launch. Self-signed HTTPS on :8971 is trusted for local NVR use.
 - **Camera grid** — cameras from `GET /api/config`, with enable/disable toggles via Frigate’s runtime camera API (`PUT /api/camera/{name}/set/enabled`).
-- **LibVLC streaming** — live RTSP (go2rtc restream on port **8554**) with main/sub stream switching, plus recording playback via Frigate VOD/clip URLs.
+- **Live streaming** — driven by cached `/api/config` (go2rtc stream names + optional listen ports). Prefers authenticated HTTPS on the Frigate base URL (HLS/MJPEG). LibVLC tries config-derived candidates; if they fail (common with self-signed TLS), Falcor falls back to an **OkHttp MJPEG / snapshot live preview**. Direct RTSP/go2rtc HTTP only when `go2rtc.rtsp` / `go2rtc.api` listen appears in config.
 - **Two-way audio** — talk UI when the camera/config suggests audio support; requests `RECORD_AUDIO` and switches to a talk-capable go2rtc stream when possible. Hidden/disabled gracefully otherwise.
 - **PTZ** — toolbar / chip button opens a dedicated bottom-sheet D-pad when Frigate reports PTZ (`/api/{camera}/ptz/info` or ONVIF in config). Commands use the same **WebSocket** path as the official Frigate web UI (`ws(s)://<host>/ws`, topic `{camera}/ptz`). Press-and-hold sends `MOVE_*` / `ZOOM_*` / `FOCUS_*`; release sends `STOP`. Presets listed from ptz/info. Controls hide when unsupported.
 - **History scrubber** — recordings from `/api/{camera}/recordings`; scrubbing seeks the VLC player using Frigate VOD/clip endpoints.
@@ -97,8 +97,24 @@ This is intentional for **self-hosted / private-network** Frigate only. Do not p
 
 ### Streaming notes
 
-- Live video prefers **go2rtc RTSP**: `rtsp://<frigate-host>:8554/<camera_or_stream_name>`. Ensure port **8554** is reachable from the phone (same LAN or VPN).
-- Thumbnails use `GET /api/{camera}/latest.jpg`.
+After login (and on session restore), Falcor caches `GET /api/config` and derives stream names and optional ports from it:
+
+- **Cameras / live.streams** — role → go2rtc stream name (main/sub/talk)
+- **go2rtc.streams** keys — authoritative restream names
+- **go2rtc.rtsp.listen** / **go2rtc.api.listen** — only if present and not loopback-only; Falcor never invents closed Docker ports like a blind `:8554` / `:1984`
+
+Live URL order:
+
+1. go2rtc HLS via Frigate: `GET /api/go2rtc/stream.m3u8?src=<config stream name>`
+2. Frigate continuous MJPEG: `GET /api/{camera}` (LibVLC and/or OkHttp preview)
+3. Optional direct go2rtc HTTP **only when** `go2rtc.api.listen` is in config
+4. Optional RTSP **only when** `go2rtc.rtsp.listen` is in config (uses that port)
+
+If those optional listens are absent, Falcor degrades to HTTPS MJPEG + `latest.jpg` OkHttp live preview.
+
+LibVLC uses `:http-header=Authorization: Bearer <token>` (not `:http-password=`). Its own TLS stack may still reject Frigate’s self-signed cert; when every LibVLC candidate fails, the camera screen switches to **OkHttp live preview** (MJPEG stream or ~350ms `latest.jpg` poll) so you still see moving video.
+
+- Thumbnails use `GET /api/{camera}/latest.jpg` (Coil + same trusted OkHttp client).
 - History/playback uses `/api/vod/...` and `/api/{camera}/start/.../end/.../clip.mp4`.
 
 ## Permissions
@@ -131,7 +147,7 @@ app/src/main/java/com/falcor/viewer/
 | Recordings | `GET /api/{cam}/recordings` |
 | PTZ info | `GET /api/{cam}/ptz/info` |
 | PTZ move | WebSocket `ws(s)://<base>/ws` — JSON `{"topic":"{cam}/ptz","payload":"MOVE_LEFT","retain":false}` (same as Frigate web UI); HTTP `GET /api/{cam}/ptz/{command}` is last-resort fallback only |
-| Live | go2rtc `rtsp://host:8554/...` |
+| Live | HTTPS HLS/MJPEG on base URL first; OkHttp MJPEG/snapshot fallback; RTSP `:8554` last |
 | Event media | `/api/events/{id}/snapshot.jpg`, `/clip.mp4` |
 
 Falcor degrades gracefully when an endpoint is missing or returns 404 (e.g. PTZ or talk on cameras that do not support them).

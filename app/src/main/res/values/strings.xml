@@ -71,6 +71,8 @@
     <string name="camera_history_loading">Loading recordings…</string>
     <string name="camera_history_empty">No recordings in this range</string>
     <string name="camera_error_stream">Unable to open stream</string>
+    <string name="camera_live_preview">Live preview</string>
+    <string name="camera_live_preview_mode">Live preview (MJPEG)</string>
     <string name="camera_permission_mic">Microphone permission is required for talk-back.</string>
     <string name="camera_back">Back</string>
     <string name="camera_retry">Retry</string>

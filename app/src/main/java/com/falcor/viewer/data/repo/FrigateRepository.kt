@@ -10,6 +10,7 @@ import com.falcor.viewer.data.model.FrigateEvent
 import com.falcor.viewer.data.model.LoginRequest
 import com.falcor.viewer.data.model.PtzInfo
 import com.falcor.viewer.data.model.RecordingSegment
+import com.falcor.viewer.data.model.resolveStreamNames
 import com.falcor.viewer.data.model.toUi
 import com.falcor.viewer.data.prefs.SecureCredentialStore
 import com.falcor.viewer.data.ws.FrigateWsClient
@@ -58,7 +59,17 @@ class FrigateRepository(
     private fun restore(creds: SecureCredentialStore.Credentials) {
         api = FrigateClientFactory.create(creds)
         _sessionReady.value = true
+        // Config is fetched on first API use (getCameras / ensureConfig); keep session ready.
     }
+
+    /** Ensure [cachedConfig] is populated from GET /api/config (login + session restore path). */
+    suspend fun ensureConfig(): Result<FrigateConfig> = withContext(Dispatchers.IO) {
+        runCatching {
+            cachedConfig ?: requireApi().getConfig().also { cachedConfig = it }
+        }
+    }
+
+    fun cachedFrigateConfig(): FrigateConfig? = cachedConfig
 
     /**
      * Connect to Frigate:
@@ -163,9 +174,10 @@ class FrigateRepository(
         runCatching {
             val config = cachedConfig ?: requireApi().getConfig().also { cachedConfig = it }
             val base = baseUrl
+            val go2rtcKeys = config.go2rtc?.streamKeys.orEmpty()
             config.cameras.map { (name, cam) ->
                 val ptz = runCatching { requireApi().getPtzInfo(name).isSupported }.getOrNull()
-                cam.toUi(name, base, ptz)
+                cam.toUi(name, base, ptz, go2rtcKeys)
             }.sortedBy { it.name }
         }
     }
@@ -316,35 +328,135 @@ class FrigateRepository(
 
     fun eventClipUrl(eventId: String): String = "$baseUrl/api/events/$eventId/clip.mp4"
 
+    /** Frigate continuous MJPEG feed (same auth/TLS path as thumbnails). */
+    fun mjpegLiveUrl(camera: String): String = "$baseUrl/api/$camera"
+
     /**
-     * Build live stream URLs for LibVLC.
-     * Prefer go2rtc RTSP restream (port 8554), then Frigate HTTP MJPEG as last resort.
+     * Authenticated OkHttp client that trusts Frigate's self-signed cert — reuse for
+     * Coil, MJPEG preview, and snapshot polling.
+     */
+    fun authenticatedHttpClient(): okhttp3.OkHttpClient {
+        val token = credentials?.token
+        return FrigateClientFactory.okHttpClient(token)
+    }
+
+    /**
+     * Build live stream URL candidates from cached Frigate config.
+     *
+     * Prefer authenticated HTTPS on the user baseUrl. Only add direct go2rtc
+     * RTSP / :API ports when [Go2RtcConfig] exposes a non-loopback listen address —
+     * never invent closed Docker ports.
+     *
+     * Order:
+     * 1. go2rtc HLS via Frigate API (`/api/go2rtc/stream.m3u8?src=`)
+     * 2. Frigate continuous MJPEG (`/api/{camera}`)
+     * 3. Optional go2rtc HTTP API listen from config
+     * 4. Optional RTSP listen from config (last)
      */
     fun liveStreamUrls(camera: String, preferSub: Boolean, streamNames: List<String>): List<String> {
         val host = runCatching { URI(baseUrl).host }.getOrNull() ?: return emptyList()
-        val schemeHost = baseUrl.trimEnd('/')
-        val preferred = when {
-            preferSub && streamNames.any { it.contains("sub", true) } ->
-                streamNames.first { it.contains("sub", true) }
-            streamNames.isNotEmpty() -> streamNames.first()
-            else -> camera
-        }
-        val alt = streamNames.firstOrNull { it != preferred }
+        val base = baseUrl.trimEnd('/')
+        val config = cachedConfig
+        val go2rtc = config?.go2rtc
+        val camCfg = config?.cameras?.get(camera)
+        val roleMap = camCfg?.live?.streams.orEmpty()
+
+        val preferred = resolvePreferredStreamName(
+            camera = camera,
+            preferSub = preferSub,
+            roleMap = roleMap,
+            streamNames = streamNames,
+            go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+        )
+        val names = LinkedHashSet<String>().apply {
+            add(preferred)
+            addAll(streamNames)
+            if (camCfg != null) {
+                addAll(resolveStreamNames(camera, camCfg, go2rtc?.streamKeys.orEmpty()))
+            }
+            add(camera)
+        }.filter { it.isNotBlank() }
+
+        val apiPort = go2rtc?.apiListenPort()
+        val rtspPort = go2rtc?.rtspListenPort()
+
         return buildList {
-            add("rtsp://$host:8554/$preferred")
-            if (alt != null) add("rtsp://$host:8554/$alt")
-            if (preferred != camera) add("rtsp://$host:8554/$camera")
-            add("$schemeHost/live/$preferred/index.m3u8")
-            add("$schemeHost/api/$camera")
+            // 1. HLS through Frigate (same host/port/JWT as thumbnails)
+            names.forEach { n ->
+                add("$base/api/go2rtc/stream.m3u8?src=$n")
+            }
+            // 2. Continuous MJPEG — always available via Frigate API
+            add("$base/api/$camera")
+            // 3. Direct go2rtc HTTP only when config publishes a reachable API listen
+            if (apiPort != null) {
+                names.forEach { n ->
+                    add("http://$host:$apiPort/api/stream.m3u8?src=$n&mp4")
+                    add("http://$host:$apiPort/api/stream.mp4?src=$n")
+                }
+            }
+            // 4. RTSP only when config publishes a reachable RTSP listen
+            if (rtspPort != null) {
+                names.forEach { n ->
+                    add("rtsp://$host:$rtspPort/$n")
+                }
+            }
         }.distinct()
     }
 
+    private fun resolvePreferredStreamName(
+        camera: String,
+        preferSub: Boolean,
+        roleMap: Map<String, String>,
+        streamNames: List<String>,
+        go2rtcKeys: Set<String>
+    ): String {
+        fun pickFromRoles(sub: Boolean): String? {
+            val entry = roleMap.entries.firstOrNull { (role, _) ->
+                if (sub) role.contains("sub", true)
+                else role.contains("main", true) || role.equals("stream", true)
+            }
+            return entry?.value?.trim()?.takeIf { it.isNotEmpty() }
+        }
+        val fromRole = if (preferSub) {
+            pickFromRoles(sub = true) ?: pickFromRoles(sub = false)
+        } else {
+            pickFromRoles(sub = false) ?: roleMap.values.firstOrNull()?.trim()
+        }
+        if (!fromRole.isNullOrBlank()) {
+            if (go2rtcKeys.isEmpty() || fromRole in go2rtcKeys) return fromRole
+        }
+        val fromNames = when {
+            preferSub && streamNames.any { it.contains("sub", true) } ->
+                streamNames.first { it.contains("sub", true) }
+            !preferSub && streamNames.any { it.contains("main", true) } ->
+                streamNames.first { it.contains("main", true) }
+            streamNames.isNotEmpty() -> streamNames.first()
+            else -> null
+        }
+        if (!fromNames.isNullOrBlank()) return fromNames
+        if (camera in go2rtcKeys) return camera
+        return camera
+    }
+
     fun talkStreamName(streamNames: List<String>, camera: String): String? {
-        return streamNames.firstOrNull {
+        val go2rtcKeys = cachedConfig?.go2rtc?.streamKeys.orEmpty()
+        val talkFromNames = streamNames.firstOrNull {
             it.contains("talk", true) || it.contains("twoway", true) || it.contains("two_way", true)
-        } ?: streamNames.firstOrNull()?.takeIf {
-            true
-        }?.let { camera }
+        }
+        if (talkFromNames != null) return talkFromNames
+        val talkFromGo2rtc = go2rtcKeys.firstOrNull { key ->
+            (key.contains(camera, true)) &&
+                (key.contains("talk", true) || key.contains("twoway", true) || key.contains("two_way", true))
+        }
+        if (talkFromGo2rtc != null) return talkFromGo2rtc
+        return streamNames.firstOrNull() ?: camera.takeIf { it in go2rtcKeys || go2rtcKeys.isEmpty() }
+    }
+
+    /** Talk / live RTSP URL only when config exposes RTSP listen; else null (use HTTPS candidates). */
+    fun rtspUrlForStream(streamName: String): String? {
+        val host = runCatching { URI(baseUrl).host }.getOrNull() ?: return null
+        val port = cachedConfig?.go2rtc?.rtspListenPort() ?: return null
+        return "rtsp://$host:$port/$streamName"
     }
 
     fun recordingPlaybackUrl(camera: String, startTs: Double, endTs: Double): String =

@@ -33,6 +33,7 @@ class HomeViewModel(
     fun refresh() {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = false) }
+            repository.ensureConfig()
             val result = repository.getCameras()
             _state.update {
                 if (result.isSuccess) {

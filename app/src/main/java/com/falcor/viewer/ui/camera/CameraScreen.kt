@@ -70,6 +70,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.falcor.viewer.R
+import com.falcor.viewer.player.OkHttpLivePreview
 import com.falcor.viewer.player.VlcPlayer
 import com.falcor.viewer.ui.components.ErrorRetry
 import java.text.DateFormat
@@ -147,13 +148,22 @@ fun CameraScreen(
                         .padding(padding)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    VlcPlayer(
-                        mediaUrl = state.mediaUrl,
-                        headers = viewModel.authHeaders(),
-                        mute = !state.talking,
-                        onError = { viewModel.onStreamError() },
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    if (state.useOkHttpPreview && state.isLive) {
+                        OkHttpLivePreview(
+                            mjpegUrl = viewModel.mjpegLiveUrl(),
+                            snapshotUrl = viewModel.snapshotLiveUrl(),
+                            okHttpClient = viewModel.httpClient(),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        VlcPlayer(
+                            mediaUrl = state.mediaUrl,
+                            headers = viewModel.authHeaders(),
+                            mute = !state.talking,
+                            onError = { viewModel.onStreamError() },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
 
                     Row(
                         modifier = Modifier

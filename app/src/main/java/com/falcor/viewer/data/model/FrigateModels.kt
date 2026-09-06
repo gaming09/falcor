@@ -24,8 +24,56 @@ data class FrigateConfig(
 
 @Serializable
 data class Go2RtcConfig(
-    val streams: Map<String, JsonElement> = emptyMap()
-)
+    val streams: Map<String, JsonElement> = emptyMap(),
+    /** e.g. { "listen": ":8554" } — JsonElement for version flexibility */
+    val rtsp: JsonElement? = null,
+    /** e.g. { "listen": ":1984" } */
+    val api: JsonElement? = null,
+    /** webrtc candidates / listen — used only as optional hints */
+    val webrtc: JsonElement? = null
+) {
+    val streamKeys: Set<String> get() = streams.keys
+
+    /** TCP port for go2rtc RTSP restream, or null if not configured / loopback-only. */
+    fun rtspListenPort(): Int? = parseListenPort(listenString(rtsp), allowLoopback = false)
+
+    /** TCP port for go2rtc HTTP API (HLS/WebUI), or null if not configured / loopback-only. */
+    fun apiListenPort(): Int? = parseListenPort(listenString(api), allowLoopback = false)
+
+    companion object {
+        fun listenString(section: JsonElement?): String? {
+            if (section == null) return null
+            val obj = section as? JsonObject ?: return (section as? JsonPrimitive)?.contentOrNull
+            val listen = obj["listen"] ?: return null
+            return when (listen) {
+                is JsonPrimitive -> listen.contentOrNull
+                else -> null
+            }
+        }
+
+        /**
+         * Parse go2rtc listen values: ":8554", "0.0.0.0:8554", "127.0.0.1:1984", or bare "8554".
+         * Returns null when missing, unparsable, or bound to loopback (unreachable from the phone)
+         * unless [allowLoopback] is true.
+         */
+        fun parseListenPort(listen: String?, allowLoopback: Boolean = false): Int? {
+            if (listen.isNullOrBlank()) return null
+            val raw = listen.trim().trim('"')
+            val hostPort = when {
+                raw.startsWith(":") -> "0.0.0.0$raw"
+                raw.contains(":") -> raw
+                raw.all { it.isDigit() } -> "0.0.0.0:$raw"
+                else -> return null
+            }
+            val host = hostPort.substringBeforeLast(':').ifBlank { "0.0.0.0" }
+            val port = hostPort.substringAfterLast(':').toIntOrNull() ?: return null
+            if (port !in 1..65535) return null
+            val loopback = host == "127.0.0.1" || host == "localhost" || host == "::1"
+            if (loopback && !allowLoopback) return null
+            return port
+        }
+    }
+}
 
 @Serializable
 data class CameraConfig(
@@ -162,15 +210,56 @@ data class CameraUiModel(
     val thumbnailUrl: String
 )
 
-fun CameraConfig.toUi(name: String, baseUrl: String, ptzSupported: Boolean? = null): CameraUiModel {
-    val streams = live?.streams?.keys?.toList().orEmpty()
+/**
+ * Resolve go2rtc stream names for a camera from Frigate config:
+ * 1) camera.live.streams values (role → name) that exist in go2rtc.streams
+ * 2) all live.streams values
+ * 3) go2rtc.streams keys matching the camera name / prefix
+ * 4) camera name alone
+ */
+fun resolveStreamNames(
+    cameraName: String,
+    camera: CameraConfig,
+    go2rtcStreamKeys: Set<String>
+): List<String> {
+    val streamMap = camera.live?.streams.orEmpty()
+    val fromLive = streamMap.values.map { it.trim() }.filter { it.isNotEmpty() }
+    val resolved = LinkedHashSet<String>()
+    if (go2rtcStreamKeys.isNotEmpty()) {
+        fromLive.filter { it in go2rtcStreamKeys }.forEach { resolved.add(it) }
+    }
+    if (resolved.isEmpty()) fromLive.forEach { resolved.add(it) }
+    if (resolved.isEmpty() && go2rtcStreamKeys.isNotEmpty()) {
+        go2rtcStreamKeys.filter { key ->
+            key.equals(cameraName, true) ||
+                key.startsWith("${cameraName}_", true) ||
+                key.startsWith("$cameraName-", true) ||
+                key.contains(cameraName, true)
+        }.sortedBy { it.length }.forEach { resolved.add(it) }
+    }
+    if (resolved.isEmpty()) resolved.add(cameraName)
+    return resolved.toList()
+}
+
+fun CameraConfig.toUi(
+    name: String,
+    baseUrl: String,
+    ptzSupported: Boolean? = null,
+    go2rtcStreamKeys: Set<String> = emptySet()
+): CameraUiModel {
+    val streamMap = live?.streams.orEmpty()
+    val streams = resolveStreamNames(name, this, go2rtcStreamKeys)
     val audioOn = audio?.enabled == true
     return CameraUiModel(
         name = name,
         enabled = isEnabled,
         supportsPtz = ptzSupported ?: supportsPtzHint,
-        supportsAudio = audioOn || streams.any { it.contains("talk", true) || it.contains("twoway", true) },
-        streamNames = streams.ifEmpty { listOf(name) },
+        supportsAudio = audioOn || streams.any {
+            it.contains("talk", true) || it.contains("twoway", true) || it.contains("two_way", true)
+        } || streamMap.keys.any {
+            it.contains("talk", true) || it.contains("twoway", true) || it.contains("two_way", true)
+        },
+        streamNames = streams,
         thumbnailUrl = "$baseUrl/api/$name/latest.jpg"
     )
 }
