@@ -1,11 +1,13 @@
 package com.falcor.viewer.data.repo
 
+import android.util.Log
 import com.falcor.viewer.data.api.FrigateApi
 import com.falcor.viewer.data.api.FrigateClientFactory
 import com.falcor.viewer.data.model.CameraSetBody
 import com.falcor.viewer.data.model.CameraUiModel
 import com.falcor.viewer.data.model.FrigateConfig
 import com.falcor.viewer.data.model.FrigateEvent
+import com.falcor.viewer.data.model.LoginRequest
 import com.falcor.viewer.data.model.PtzInfo
 import com.falcor.viewer.data.model.RecordingSegment
 import com.falcor.viewer.data.model.toUi
@@ -16,8 +18,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import retrofit2.HttpException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
 import java.net.URI
+import java.net.UnknownHostException
 import java.util.concurrent.atomic.AtomicInteger
+import javax.net.ssl.SSLException
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
 
 class FrigateRepository(
     private val credentialStore: SecureCredentialStore
@@ -49,18 +60,85 @@ class FrigateRepository(
         _sessionReady.value = true
     }
 
+    /**
+     * Connect to Frigate:
+     * 1. Normalize base URL
+     * 2. If username+password and no token → POST /api/login, extract JWT from Set-Cookie
+     * 3. Rebuild client with Bearer JWT
+     * 4. GET /api/config to verify
+     * 5. Persist credentials (including token)
+     *
+     * Token-only → Bearer directly. No auth → unauthenticated GET config (port 5000).
+     */
     suspend fun login(creds: SecureCredentialStore.Credentials): Result<FrigateConfig> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val client = FrigateClientFactory.create(creds)
-                val config = client.getConfig()
-                credentialStore.save(creds)
+                val normalized = normalizeBaseUrl(creds.baseUrl)
+                var working = creds.copy(baseUrl = normalized)
+
+                val hasUserPass =
+                    !working.username.isNullOrBlank() && !working.password.isNullOrBlank()
+                val hasToken = !working.token.isNullOrBlank()
+
+                if (hasUserPass && !hasToken) {
+                    val jwt = obtainJwt(normalized, working.username!!, working.password!!)
+                    working = working.copy(token = jwt)
+                    Log.d(TAG, "Login obtained JWT (len=${jwt.length})")
+                }
+
+                val client = FrigateClientFactory.create(working)
+                val config = try {
+                    client.getConfig()
+                } catch (e: HttpException) {
+                    throw mapHttpException(e)
+                }
+                credentialStore.save(working)
                 api = client
                 cachedConfig = config
                 _sessionReady.value = true
+                // Refresh WS with new token on next connect
+                disconnectPtzWs(force = true)
                 config
+            }.recoverCatching { t ->
+                Log.e(TAG, "login failed: ${t.message}", t)
+                throw classify(t)
             }
         }
+
+    private suspend fun obtainJwt(baseUrl: String, user: String, password: String): String {
+        // Unauthenticated client for login only (no Bearer / Basic).
+        val loginApi = FrigateClientFactory.create(baseUrl, bearerToken = null)
+        val response = try {
+            loginApi.login(LoginRequest(user = user, password = password))
+        } catch (e: HttpException) {
+            throw mapHttpException(e)
+        }
+
+        if (response.code() == 401 || response.code() == 403) {
+            throw FrigateConnectException(
+                FrigateConnectException.Kind.AUTH,
+                "Login rejected: HTTP ${response.code()}"
+            )
+        }
+        if (!response.isSuccessful) {
+            throw FrigateConnectException(
+                FrigateConnectException.Kind.HTTP,
+                "Login failed: HTTP ${response.code()}"
+            )
+        }
+
+        val fromCookie = extractJwtFromSetCookie(response.headers().values("Set-Cookie"))
+        if (!fromCookie.isNullOrBlank()) return fromCookie
+
+        val bodyText = response.body()?.string().orEmpty()
+        val fromBody = extractJwtFromJsonBody(bodyText)
+        if (!fromBody.isNullOrBlank()) return fromBody
+
+        throw FrigateConnectException(
+            FrigateConnectException.Kind.AUTH,
+            "Login succeeded but no JWT cookie/token found in response"
+        )
+    }
 
     fun logout() {
         disconnectPtzWs(force = true)
@@ -275,23 +353,128 @@ class FrigateRepository(
     fun vodPlaylistUrl(camera: String, startTs: Double, endTs: Double): String =
         "$baseUrl/api/vod/$camera/start/$startTs/end/$endTs/index.m3u8"
 
+    /** Auth headers for media requests — Bearer JWT only (no Basic). */
     fun authHeaders(): Map<String, String> {
         val creds = credentials ?: return emptyMap()
-        val token = creds.token
-        return when {
-            !token.isNullOrBlank() -> {
-                val value = if (token.startsWith("Bearer ", ignoreCase = true)) token else "Bearer $token"
-                mapOf("Authorization" to value)
+        val token = creds.token?.trim()?.takeIf { it.isNotEmpty() } ?: return emptyMap()
+        val value = if (token.startsWith("Bearer ", ignoreCase = true)) token else "Bearer $token"
+        return mapOf("Authorization" to value)
+    }
+
+    companion object {
+        private const val TAG = "FrigateRepository"
+
+        fun normalizeBaseUrl(raw: String): String {
+            var url = raw.trim().trimEnd('/')
+            if (!url.contains("://")) {
+                // Prefer https for authenticated UI port when scheme omitted.
+                url = if (url.substringAfterLast(':').substringBefore('/').all { it.isDigit() } &&
+                    url.substringAfterLast(':').substringBefore('/').toIntOrNull() == 8971
+                ) {
+                    "https://$url"
+                } else {
+                    "http://$url"
+                }
             }
-            !creds.username.isNullOrBlank() -> {
-                mapOf(
-                    "Authorization" to okhttp3.Credentials.basic(
-                        creds.username,
-                        creds.password.orEmpty()
-                    )
+            return url.trimEnd('/')
+        }
+
+        /**
+         * Parse JWT from Set-Cookie headers. Prefers `frigate_token=` but also
+         * accepts any cookie whose name contains "token" / "jwt" / "frigate".
+         */
+        fun extractJwtFromSetCookie(setCookieHeaders: List<String>): String? {
+            val preferredNames = listOf("frigate_token", "jwt", "token")
+            for (header in setCookieHeaders) {
+                val first = header.substringBefore(';').trim()
+                val eq = first.indexOf('=')
+                if (eq <= 0) continue
+                val name = first.substring(0, eq).trim()
+                val value = first.substring(eq + 1).trim()
+                if (value.isEmpty() || value.equals("deleted", ignoreCase = true)) continue
+                if (preferredNames.any { name.equals(it, ignoreCase = true) }) return value
+            }
+            for (header in setCookieHeaders) {
+                val first = header.substringBefore(';').trim()
+                val eq = first.indexOf('=')
+                if (eq <= 0) continue
+                val name = first.substring(0, eq).trim().lowercase()
+                val value = first.substring(eq + 1).trim()
+                if (value.isEmpty()) continue
+                if (name.contains("token") || name.contains("jwt") || name.contains("frigate")) {
+                    return value
+                }
+            }
+            return null
+        }
+
+        fun extractJwtFromJsonBody(body: String): String? {
+            if (body.isBlank()) return null
+            return runCatching {
+                val obj = FrigateClientFactory.json.parseToJsonElement(body).jsonObject
+                sequenceOf("token", "access_token", "jwt", "frigate_token")
+                    .mapNotNull { key -> obj[key]?.jsonPrimitive?.content }
+                    .firstOrNull { it.isNotBlank() }
+            }.getOrNull()
+        }
+
+        private fun mapHttpException(e: HttpException): FrigateConnectException {
+            val code = e.code()
+            return when (code) {
+                401, 403 -> FrigateConnectException(
+                    FrigateConnectException.Kind.AUTH,
+                    "HTTP $code: ${e.message()}"
+                )
+                else -> FrigateConnectException(
+                    FrigateConnectException.Kind.HTTP,
+                    "HTTP $code: ${e.message()}"
                 )
             }
-            else -> emptyMap()
+        }
+
+        private fun classify(t: Throwable): FrigateConnectException {
+            if (t is FrigateConnectException) return t
+            val cause = generateSequence(t) { it.cause }.toList()
+            if (cause.any {
+                    it is SSLHandshakeException ||
+                        it is SSLPeerUnverifiedException ||
+                        it is SSLException ||
+                        it.javaClass.name.contains("CertPath", ignoreCase = true) ||
+                        (it.message?.contains("Certificate", ignoreCase = true) == true) ||
+                        (it.message?.contains("SSL", ignoreCase = true) == true &&
+                            it.message?.contains("handshake", ignoreCase = true) == true)
+                }
+            ) {
+                return FrigateConnectException(
+                    FrigateConnectException.Kind.SSL,
+                    t.message ?: "SSL/certificate failure"
+                )
+            }
+            if (t is HttpException) return mapHttpException(t)
+            if (cause.any {
+                    it is ConnectException ||
+                        it is SocketTimeoutException ||
+                        it is UnknownHostException ||
+                        it.javaClass.name.contains("ConnectException")
+                }
+            ) {
+                return FrigateConnectException(
+                    FrigateConnectException.Kind.NETWORK,
+                    t.message ?: "Connection failed"
+                )
+            }
+            return FrigateConnectException(
+                FrigateConnectException.Kind.UNKNOWN,
+                t.message ?: "Unknown error"
+            )
         }
     }
+}
+
+/** Typed connection failure for login UI string mapping. */
+class FrigateConnectException(
+    val kind: Kind,
+    message: String
+) : Exception(message) {
+    enum class Kind { SSL, AUTH, NETWORK, HTTP, UNKNOWN }
 }

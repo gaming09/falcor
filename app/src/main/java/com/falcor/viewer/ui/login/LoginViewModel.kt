@@ -1,9 +1,12 @@
 package com.falcor.viewer.ui.login
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.falcor.viewer.R
 import com.falcor.viewer.data.prefs.SecureCredentialStore
+import com.falcor.viewer.data.repo.FrigateConnectException
 import com.falcor.viewer.data.repo.FrigateRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -55,11 +58,22 @@ class LoginViewModel(
         val url = s.baseUrl.trim().trimEnd('/')
         when {
             url.isEmpty() -> {
-                _state.update { it.copy(errorRes = com.falcor.viewer.R.string.login_error_empty_url, restoring = false) }
+                _state.update {
+                    it.copy(errorRes = R.string.login_error_empty_url, restoring = false)
+                }
                 return
             }
-            !url.startsWith("http://") && !url.startsWith("https://") -> {
-                _state.update { it.copy(errorRes = com.falcor.viewer.R.string.login_error_invalid_url, restoring = false) }
+            !url.startsWith("http://") &&
+                !url.startsWith("https://") &&
+                !url.contains("://") -> {
+                // Allow host:port — repository will add scheme.
+            }
+            url.contains("://") &&
+                !url.startsWith("http://") &&
+                !url.startsWith("https://") -> {
+                _state.update {
+                    it.copy(errorRes = R.string.login_error_invalid_url, restoring = false)
+                }
                 return
             }
         }
@@ -76,17 +90,33 @@ class LoginViewModel(
                 if (result.isSuccess) {
                     it.copy(isLoading = false, restoring = false, loggedIn = true)
                 } else {
+                    val err = result.exceptionOrNull()
+                    Log.e(TAG, "Connect failed: ${err?.message}", err)
                     it.copy(
                         isLoading = false,
                         restoring = false,
-                        errorRes = com.falcor.viewer.R.string.login_error_failed
+                        errorRes = mapError(err)
                     )
                 }
             }
         }
     }
 
+    private fun mapError(err: Throwable?): Int {
+        val kind = (err as? FrigateConnectException)?.kind
+            ?: (err?.cause as? FrigateConnectException)?.kind
+        return when (kind) {
+            FrigateConnectException.Kind.SSL -> R.string.login_error_ssl
+            FrigateConnectException.Kind.AUTH -> R.string.login_error_auth
+            FrigateConnectException.Kind.NETWORK -> R.string.login_error_network
+            FrigateConnectException.Kind.HTTP -> R.string.login_error_http
+            FrigateConnectException.Kind.UNKNOWN, null -> R.string.login_error_failed
+        }
+    }
+
     companion object {
+        private const val TAG = "LoginViewModel"
+
         fun factory(repo: FrigateRepository, store: SecureCredentialStore) =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")

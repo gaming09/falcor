@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Allow cleartext HTTP to local Frigate hosts (LAN IPs / .local). -->
+<!-- Cleartext for local HTTP Frigate; also trust user-installed CAs for HTTPS.
+     OkHttp uses a permissive TrustManager for self-signed Frigate :8971 certs —
+     see LocalSsl / README. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="user" />
         </trust-anchors>
     </base-config>
 </network-security-config>

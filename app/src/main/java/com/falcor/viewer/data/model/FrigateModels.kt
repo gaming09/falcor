@@ -66,6 +66,13 @@ data class CameraSetBody(
     val value: String
 )
 
+/** Body for POST /api/login — Frigate expects "user", not "username". */
+@Serializable
+data class LoginRequest(
+    val user: String,
+    val password: String
+)
+
 @Serializable
 data class FrigateEvent(
     val id: String,

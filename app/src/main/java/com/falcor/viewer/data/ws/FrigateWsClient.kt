@@ -1,13 +1,13 @@
 package com.falcor.viewer.data.ws
 
 import android.util.Log
+import com.falcor.viewer.data.api.LocalSsl.trustLocalSelfSigned
 import com.falcor.viewer.data.prefs.SecureCredentialStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import okhttp3.Credentials
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -21,6 +21,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * URL: HTTP base → ws/wss + "/ws" (e.g. http://host:5000/ → ws://host:5000/ws).
  * Messages: {"topic":"…","payload":"…","retain":false} (onConnect uses "message" instead of payload).
+ *
+ * Auth: Bearer JWT from login (same token as HTTP). Uses permissive TLS for
+ * self-signed wss:// on Frigate port 8971.
  */
 class FrigateWsClient(
     private val credentials: SecureCredentialStore.Credentials,
@@ -164,22 +167,13 @@ class FrigateWsClient(
             return if (wsBase.endsWith("/ws")) wsBase else "$wsBase/ws"
         }
 
+        /** Attach Bearer JWT only — Frigate does not use Basic for WS auth. */
         fun applyAuth(builder: Request.Builder, credentials: SecureCredentialStore.Credentials) {
-            val token = credentials.token
-            when {
-                !token.isNullOrBlank() -> {
-                    val value =
-                        if (token.startsWith("Bearer ", ignoreCase = true)) token
-                        else "Bearer $token"
-                    builder.header("Authorization", value)
-                }
-                !credentials.username.isNullOrBlank() -> {
-                    builder.header(
-                        "Authorization",
-                        Credentials.basic(credentials.username, credentials.password.orEmpty())
-                    )
-                }
-            }
+            val token = credentials.token?.trim()?.takeIf { it.isNotEmpty() } ?: return
+            val value =
+                if (token.startsWith("Bearer ", ignoreCase = true)) token
+                else "Bearer $token"
+            builder.header("Authorization", value)
         }
 
         fun defaultClient(): OkHttpClient =
@@ -188,6 +182,7 @@ class FrigateWsClient(
                 .readTimeout(0, TimeUnit.MILLISECONDS) // keep WS alive
                 .writeTimeout(15, TimeUnit.SECONDS)
                 .pingInterval(30, TimeUnit.SECONDS)
+                .trustLocalSelfSigned()
                 .build()
     }
 }

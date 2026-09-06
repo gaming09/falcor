@@ -4,12 +4,15 @@ import com.falcor.viewer.data.model.CameraSetBody
 import com.falcor.viewer.data.model.FrigateConfig
 import com.falcor.viewer.data.model.FrigateEvent
 import com.falcor.viewer.data.model.GenericSuccess
+import com.falcor.viewer.data.model.LoginRequest
 import com.falcor.viewer.data.model.PtzInfo
 import com.falcor.viewer.data.model.RecordingSegment
 import com.falcor.viewer.data.model.RecordingSummaryDay
+import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -19,6 +22,14 @@ import retrofit2.http.Query
  * See https://docs.frigate.video/integrations/api/frigate-http-api
  */
 interface FrigateApi {
+
+    /**
+     * Authenticate with username/password. Success returns HTTP 200 with empty
+     * body and sets a JWT cookie (default name `frigate_token`). Use that JWT
+     * as `Authorization: Bearer <token>` for subsequent calls.
+     */
+    @POST("login")
+    suspend fun login(@Body body: LoginRequest): Response<ResponseBody>
 
     @GET("config")
     suspend fun getConfig(): FrigateConfig
@@ -76,5 +87,5 @@ interface FrigateApi {
     ): Response<GenericSuccess>
 
     @GET("go2rtc/streams")
-    suspend fun go2rtcStreams(): Response<okhttp3.ResponseBody>
+    suspend fun go2rtcStreams(): Response<ResponseBody>
 }

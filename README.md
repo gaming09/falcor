@@ -6,7 +6,7 @@ Package ID: `com.falcor.viewer`
 
 ## Features
 
-- **Persistent login** — Frigate base URL plus optional username/password or JWT/API token stored in `EncryptedSharedPreferences`. Session restores on launch.
+- **Persistent login** — Frigate base URL plus username/password (`POST /api/login` → JWT) or pasted Bearer token, stored in `EncryptedSharedPreferences`. Session restores on launch. Self-signed HTTPS on :8971 is trusted for local NVR use.
 - **Camera grid** — cameras from `GET /api/config`, with enable/disable toggles via Frigate’s runtime camera API (`PUT /api/camera/{name}/set/enabled`).
 - **LibVLC streaming** — live RTSP (go2rtc restream on port **8554**) with main/sub stream switching, plus recording playback via Frigate VOD/clip URLs.
 - **Two-way audio** — talk UI when the camera/config suggests audio support; requests `RECORD_AUDIO` and switches to a talk-capable go2rtc stream when possible. Hidden/disabled gracefully otherwise.
@@ -72,16 +72,28 @@ On first launch, enter your Frigate **base URL** (no trailing `/api`):
 
 | Setup | Example URL |
 | --- | --- |
-| Local HTTP (common) | `http://192.168.1.50:5000` |
+| Local HTTP (unauthenticated) | `http://192.168.1.50:5000` |
 | Authenticated UI port | `https://192.168.1.50:8971` |
 | Tailscale / hostname | `https://frigate.example.com` |
 
-Optional:
+### Authentication (not HTTP Basic)
 
-- **Username / password** — Frigate auth (Basic)
-- **JWT / API token** — sent as `Authorization: Bearer …` (overrides user/pass when set)
+Frigate’s authenticated port (**8971**) uses JWT cookies, **not** HTTP Basic:
 
-Credentials are encrypted on-device and restored automatically.
+1. Falcor `POST`s `/api/login` with JSON `{"user":"…","password":"…"}`.
+2. Frigate sets a cookie (default name `frigate_token`) containing the JWT.
+3. Falcor stores that JWT and sends `Authorization: Bearer <token>` on later HTTP and WebSocket calls.
+4. `GET /api/config` verifies the session.
+
+You can also paste an existing JWT / API token; that overrides username/password. With no user/pass/token (typical port **5000**), Falcor just loads config unauthenticated.
+
+Credentials (including the JWT) are encrypted on-device and restored automatically.
+
+### Self-signed HTTPS (LAN / local NVR)
+
+Frigate generates a **self-signed** TLS certificate for port 8971. Falcor intentionally uses a **permissive OkHttp TrustManager + hostname verifier** (and trusts user CAs in `network_security_config`) so LAN self-signed certs work without installing the Frigate CA on the phone.
+
+This is intentional for **self-hosted / private-network** Frigate only. Do not point Falcor at untrusted public HTTPS hosts expecting the same trust behavior — MITM protection is effectively disabled for API/WebSocket TLS.
 
 ### Streaming notes
 
@@ -96,6 +108,7 @@ Credentials are encrypted on-device and restored automatically.
 | `INTERNET` | Frigate API + streams |
 | `RECORD_AUDIO` | Two-way talk (only when you enable Talk) |
 | Cleartext HTTP | Allowed so local `http://` Frigate installs work (`usesCleartextTraffic` + network security config) |
+| Self-signed TLS | OkHttp permissive TrustManager for local Frigate `:8971` (see above) |
 
 ## Project structure
 
@@ -111,6 +124,7 @@ app/src/main/java/com/falcor/viewer/
 
 | Feature | Endpoint(s) |
 | --- | --- |
+| Login (JWT) | `POST /api/login` body `{"user","password"}` → `frigate_token` cookie / Bearer |
 | Config / cameras | `GET /api/config` |
 | Enable/disable | `PUT /api/camera/{cam}/set/enabled` body `{"value":"ON"|"OFF"}` |
 | Events | `GET /api/events` |
@@ -132,7 +146,7 @@ Falcor mirrors the Frigate web UI for pan/tilt/zoom:
 2. After `OPEN`, send `{ "topic": "onConnect", "message": "", "retain": false }`.
 3. Commands: `{ "topic": "<camera>/ptz", "payload": "<CMD>", "retain": false }` where `<CMD>` is  
    `MOVE_UP` / `MOVE_DOWN` / `MOVE_LEFT` / `MOVE_RIGHT` / `ZOOM_IN` / `ZOOM_OUT` / `FOCUS_IN` / `FOCUS_OUT` / `STOP` / `preset_<name>`.
-4. Auth: the same `Authorization` header used for HTTP (Bearer JWT or Basic) is attached to the WebSocket handshake.
+4. Auth: the same `Authorization: Bearer <JWT>` header used for HTTP is attached to the WebSocket handshake (permissive TLS for `wss://` on :8971).
 5. Feature detection still uses `GET /api/{camera}/ptz/info` (features + presets). The camera screen shows a **PTZ** action in the top app bar; tapping opens a modal bottom sheet with press-and-hold controls.
 
 ## License

@@ -17,6 +17,10 @@
     <string name="login_error_empty_url">Enter a Frigate base URL</string>
     <string name="login_error_invalid_url">URL must start with http:// or https://</string>
     <string name="login_error_failed">Could not reach Frigate. Check URL and credentials.</string>
+    <string name="login_error_ssl">TLS/certificate error. Frigate’s self-signed cert on port 8971 should be accepted; check the URL scheme (https://) and try again.</string>
+    <string name="login_error_auth">Authentication failed. Check username and password, or paste a valid JWT.</string>
+    <string name="login_error_network">Could not connect — connection refused, timed out, or host unreachable.</string>
+    <string name="login_error_http">Frigate returned an unexpected HTTP error. Check the URL and server logs.</string>
     <string name="login_saved_session">Restoring saved session…</string>
 
     <!-- Home -->
