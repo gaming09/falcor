@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <item name="falcor_webview_mic_tag" type="id" />
+    <item name="falcor_webview_probe_cb_tag" type="id" />
+    <item name="falcor_webview_probe_meta_tag" type="id" />
 </resources>

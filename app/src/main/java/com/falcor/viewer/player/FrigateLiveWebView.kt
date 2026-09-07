@@ -6,8 +6,11 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -48,6 +51,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * - No AppBar mute / __falcorMuted / applyMute storms / Tap-for-sound overlay
  * - Grants CAMERA / AUDIO_CAPTURE for getUserMedia (two-way talk)
  * - Minimal chrome JS: black background + object-fit only (does not strip controls or force mute)
+ * - 0.1.20-debug: FalcorAudioProbe snackbar + Log.i (probe-only; no product audio changes)
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -59,6 +63,12 @@ fun FrigateLiveWebView(
     showDetections: Boolean = true,
     /** When true, WebView may request mic/camera for go2rtc talk. */
     allowMicrophone: Boolean = false,
+    /** MAIN or SUB — included in probe snackbar only. */
+    qualityLabel: String = "SUB",
+    /** Caps hasListenAudio hint for probe (0/1); does not gate playback. */
+    hasListenAudio: Boolean? = null,
+    /** Compact probe line for Snackbar screenshots. */
+    onAudioProbe: ((String) -> Unit)? = null,
     onPlaying: (() -> Unit)? = null,
     onAllFailed: (() -> Unit)? = null
 ) {
@@ -69,6 +79,9 @@ fun FrigateLiveWebView(
     val onAllFailedState by rememberUpdatedState(onAllFailed)
     val showDetState by rememberUpdatedState(showDetections)
     val allowMicState by rememberUpdatedState(allowMicrophone)
+    val qualityState by rememberUpdatedState(qualityLabel)
+    val hasListenState by rememberUpdatedState(hasListenAudio)
+    val onProbeState by rememberUpdatedState(onAudioProbe)
     val urlsState by rememberUpdatedState(pageUrls)
     val attempt = remember { AtomicInteger(0) }
     val pageUrl = pageUrls.getOrNull(candidateIndex)
@@ -137,6 +150,10 @@ fun FrigateLiveWebView(
                 bearerToken = bearerToken,
                 showDetections = showDetState,
                 allowMicrophone = allowMicState,
+                qualityLabel = qualityState,
+                hasListenAudio = hasListenState,
+                candidateIndex = candidateIndex,
+                onAudioProbe = onProbeState,
                 onPlaying = {
                     loading = false
                     onPlayingState?.invoke()
@@ -222,6 +239,223 @@ private const val PLAYER_CHROME_JS = """
 })();
 """
 
+/**
+ * Probe-only diagnostic (0.1.20). Reports via FalcorAudioProbe JavascriptInterface.
+ * Does not change muted/volume/controls.
+ */
+private fun audioProbeJs(qualityLabel: String, candidateIndex: Int, hasListen: Int): String {
+    val q = qualityLabel.replace("'", "").replace("\\", "")
+    return """
+(function(){
+  var QUALITY = '$q';
+  var CAND = $candidateIndex;
+  var HAS_LISTEN = $hasListen;
+  function collectMedia(root){
+    var list = [];
+    try {
+      root.querySelectorAll('video,audio').forEach(function(v){ list.push(v); });
+    } catch(e) {}
+    try {
+      root.querySelectorAll('iframe').forEach(function(f){
+        try {
+          var doc = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+          if (doc) collectMedia(doc).forEach(function(v){ list.push(v); });
+        } catch(e) {}
+      });
+    } catch(e) {}
+    return list;
+  }
+  function pathKind(url){
+    var u = (url || '').toLowerCase();
+    if (u.indexOf('webrtc') >= 0) return 'webrtc';
+    if (u.indexOf('mse') >= 0) return 'mse';
+    if (u.indexOf('stream.html') >= 0 || u.indexOf('/stream') >= 0) return 'stream';
+    if (u.indexOf('go2rtc') >= 0) return 'go2rtc';
+    return 'other';
+  }
+  function srcParam(url){
+    try {
+      var m = /[?&]src=([^&]*)/i.exec(url || '');
+      return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : '';
+    } catch(e) { return ''; }
+  }
+  function trackInfo(tracks){
+    var out = [];
+    try {
+      if (!tracks) return out;
+      for (var i = 0; i < tracks.length; i++) {
+        var t = tracks[i];
+        out.push({
+          id: t.id || '',
+          label: t.label || '',
+          kind: t.kind || '',
+          enabled: !!t.enabled,
+          muted: !!t.muted,
+          readyState: t.readyState || ''
+        });
+      }
+    } catch(e) {}
+    return out;
+  }
+  function describeEl(el){
+    var so = null;
+    var aTracks = [];
+    var vTracks = [];
+    try { so = el.srcObject || null; } catch(e) {}
+    try {
+      if (so && so.getAudioTracks) aTracks = trackInfo(so.getAudioTracks());
+      if (so && so.getVideoTracks) vTracks = trackInfo(so.getVideoTracks());
+    } catch(e) {}
+    return {
+      tag: (el.tagName || '').toLowerCase(),
+      muted: !!el.muted,
+      defaultMuted: !!el.defaultMuted,
+      volume: (typeof el.volume === 'number') ? el.volume : -1,
+      paused: !!el.paused,
+      readyState: el.readyState,
+      srcObjectNull: so == null,
+      currentSrc: el.currentSrc || el.src || '',
+      aTracks: aTracks.length,
+      vTracks: vTracks.length,
+      audioTracksDetail: aTracks,
+      videoTracksDetail: vTracks
+    };
+  }
+  function audioContextState(){
+    try {
+      if (window.__falcorAcState) return window.__falcorAcState;
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return 'none';
+      // Do not construct a new context — only report existing if hooked.
+      return 'unknown';
+    } catch(e) { return 'err'; }
+  }
+  function probe(reason){
+    try {
+      var url = location.href || '';
+      var src = srcParam(url);
+      var kind = pathKind(url);
+      var media = collectMedia(document);
+      var videos = [];
+      var audios = [];
+      for (var i = 0; i < media.length; i++) {
+        var tag = (media[i].tagName || '').toLowerCase();
+        if (tag === 'video') videos.push(media[i]);
+        else if (tag === 'audio') audios.push(media[i]);
+      }
+      var v0 = videos.length ? describeEl(videos[0]) : null;
+      var aTrackN = v0 ? v0.aTracks : 0;
+      var vTrackN = v0 ? v0.vTracks : 0;
+      var vMute = v0 ? (v0.muted ? 1 : 0) : -1;
+      var vol = v0 ? v0.volume : -1;
+      if (!src && v0 && v0.currentSrc) src = srcParam(v0.currentSrc) || v0.currentSrc;
+      var snack = 'q=' + QUALITY + ' | src=' + (src || '?') + ' | ' + kind +
+        ' | vMute=' + vMute + ' vol=' + vol +
+        ' | aTracks=' + aTrackN + ' vTracks=' + vTrackN +
+        ' | audioEls=' + audios.length +
+        ' | hasListen=' + HAS_LISTEN;
+      var detailLines = [];
+      detailLines.push('reason=' + reason);
+      detailLines.push('quality=' + QUALITY);
+      detailLines.push('candidateIndex=' + CAND);
+      detailLines.push('url=' + url);
+      detailLines.push('src=' + src);
+      detailLines.push('pathKind=' + kind);
+      detailLines.push('hasListenAudio=' + HAS_LISTEN);
+      detailLines.push('videoCount=' + videos.length);
+      detailLines.push('audioElementCount=' + audios.length);
+      detailLines.push('audioContext=' + audioContextState());
+      for (var vi = 0; vi < videos.length; vi++) {
+        var vd = describeEl(videos[vi]);
+        detailLines.push('video[' + vi + '] muted=' + vd.muted +
+          ' defaultMuted=' + vd.defaultMuted +
+          ' volume=' + vd.volume +
+          ' paused=' + vd.paused +
+          ' readyState=' + vd.readyState +
+          ' srcObjectNull=' + vd.srcObjectNull +
+          ' aTracks=' + vd.aTracks +
+          ' vTracks=' + vd.vTracks +
+          ' currentSrc=' + vd.currentSrc);
+        for (var ai = 0; ai < vd.audioTracksDetail.length; ai++) {
+          var at = vd.audioTracksDetail[ai];
+          detailLines.push('  audioTrack[' + ai + '] id=' + at.id +
+            ' label=' + at.label +
+            ' enabled=' + at.enabled +
+            ' muted=' + at.muted +
+            ' readyState=' + at.readyState);
+        }
+        for (var yi = 0; yi < vd.videoTracksDetail.length; yi++) {
+          var yt = vd.videoTracksDetail[yi];
+          detailLines.push('  videoTrack[' + yi + '] id=' + yt.id +
+            ' label=' + yt.label +
+            ' enabled=' + yt.enabled +
+            ' muted=' + yt.muted +
+            ' readyState=' + yt.readyState);
+        }
+      }
+      for (var ae = 0; ae < audios.length; ae++) {
+        var ad = describeEl(audios[ae]);
+        detailLines.push('audioEl[' + ae + '] muted=' + ad.muted +
+          ' paused=' + ad.paused +
+          ' volume=' + ad.volume +
+          ' aTracks=' + ad.aTracks +
+          ' vTracks=' + ad.vTracks);
+      }
+      var detail = detailLines.join('\n');
+      try {
+        if (window.FalcorAudioProbe && window.FalcorAudioProbe.report) {
+          window.FalcorAudioProbe.report(snack, detail);
+        }
+      } catch(e) {}
+    } catch(e) {
+      try {
+        if (window.FalcorAudioProbe && window.FalcorAudioProbe.report) {
+          window.FalcorAudioProbe.report('probe-error', String(e));
+        }
+      } catch(e2) {}
+    }
+  }
+  probe('schedule');
+  try {
+    collectMedia(document).forEach(function(el){
+      if ((el.tagName || '').toLowerCase() !== 'video') return;
+      if (el.__falcorProbePlaying) return;
+      el.__falcorProbePlaying = true;
+      el.addEventListener('playing', function(){ probe('playing'); }, { once: false });
+    });
+  } catch(e) {}
+  if (window.__falcorProbeDelay) {
+    try { clearTimeout(window.__falcorProbeDelay); } catch(e) {}
+  }
+  window.__falcorProbeDelay = setTimeout(function(){
+    probe('delayed2s');
+    window.__falcorProbeDelay = null;
+  }, 2000);
+})();
+"""
+}
+
+private class FalcorAudioProbeBridge(
+    private val callbackHolder: Array<((String) -> Unit)?>
+) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @JavascriptInterface
+    fun report(snack: String?, detail: String?) {
+        val d = detail ?: snack.orEmpty()
+        android.util.Log.i("FalcorAudioProbe", d)
+        val s = snack.orEmpty()
+        if (s.isNotBlank()) {
+            mainHandler.post {
+                callbackHolder.getOrNull(0)?.invoke(s)
+            }
+        }
+    }
+}
+
+/** Mutable meta passed into WebView tags: [0]=quality, [1]=candidateIndex string. */
+private class ProbeMeta(var quality: String, var candidateIndex: Int, var hasListen: Int)
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun keyAndroidView(
@@ -229,6 +463,10 @@ private fun keyAndroidView(
     bearerToken: String?,
     showDetections: Boolean,
     allowMicrophone: Boolean,
+    qualityLabel: String,
+    hasListenAudio: Boolean?,
+    candidateIndex: Int,
+    onAudioProbe: ((String) -> Unit)?,
     onPlaying: () -> Unit,
     onMainFrameError: () -> Unit,
     onStarted: () -> Unit
@@ -237,6 +475,10 @@ private fun keyAndroidView(
     val onErrorState by rememberUpdatedState(onMainFrameError)
     val showDet by rememberUpdatedState(showDetections)
     val allowMic by rememberUpdatedState(allowMicrophone)
+    val qualityState by rememberUpdatedState(qualityLabel)
+    val hasListenState by rememberUpdatedState(hasListenAudio)
+    val candState by rememberUpdatedState(candidateIndex)
+    val probeState by rememberUpdatedState(onAudioProbe)
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -271,12 +513,20 @@ private fun keyAndroidView(
 
                 // Mutable holder so update{} can refresh allowMic without recreating WebView.
                 val micAllowed = booleanArrayOf(allowMic)
-                setTag(com.falcor.viewer.R.id.falcor_webview_mic_tag, micAllowed)
+                setTag(R.id.falcor_webview_mic_tag, micAllowed)
+
+                val probeCb = arrayOf(probeState)
+                setTag(R.id.falcor_webview_probe_cb_tag, probeCb)
+                val hl = if (hasListenState == true) 1 else 0
+                val probeMeta = ProbeMeta(qualityState, candState, hl)
+                setTag(R.id.falcor_webview_probe_meta_tag, probeMeta)
+                addJavascriptInterface(FalcorAudioProbeBridge(probeCb), "FalcorAudioProbe")
+
                 webChromeClient = object : WebChromeClient() {
                     override fun onPermissionRequest(request: PermissionRequest?) {
                         if (request == null) return
                         val wanted = request.resources ?: return
-                        val allow = (getTag(com.falcor.viewer.R.id.falcor_webview_mic_tag) as? BooleanArray)
+                        val allow = (getTag(R.id.falcor_webview_mic_tag) as? BooleanArray)
                             ?.getOrNull(0) == true
                         // Always grant PROTECTED_MEDIA_ID (EME). AUDIO/VIDEO capture only for talk.
                         val grant = wanted.filter { res ->
@@ -314,6 +564,14 @@ private fun keyAndroidView(
                         )
                         // Native controls visible; no mute flag / applyMute.
                         view?.evaluateJavascript(PLAYER_CHROME_JS, null)
+                        val meta = view?.getTag(R.id.falcor_webview_probe_meta_tag) as? ProbeMeta
+                        val q = meta?.quality ?: "SUB"
+                        val c = meta?.candidateIndex ?: 0
+                        val hl = meta?.hasListen ?: 0
+                        // Short delay so video element / srcObject can attach, then probe (+2s inside JS).
+                        view?.postDelayed({
+                            view.evaluateJavascript(audioProbeJs(q, c, hl), null)
+                        }, 400)
                     }
 
                     override fun onReceivedError(
@@ -341,8 +599,16 @@ private fun keyAndroidView(
             }
         },
         update = { webView ->
-            (webView.getTag(com.falcor.viewer.R.id.falcor_webview_mic_tag) as? BooleanArray)
+            (webView.getTag(R.id.falcor_webview_mic_tag) as? BooleanArray)
                 ?.set(0, allowMic)
+            @Suppress("UNCHECKED_CAST")
+            (webView.getTag(R.id.falcor_webview_probe_cb_tag) as? Array<((String) -> Unit)?>)
+                ?.set(0, probeState)
+            (webView.getTag(R.id.falcor_webview_probe_meta_tag) as? ProbeMeta)?.let {
+                it.quality = qualityState
+                it.candidateIndex = candState
+                it.hasListen = if (hasListenState == true) 1 else 0
+            }
             if (webView.url != pageUrl) {
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")
                     ?.removePrefix("bearer ")?.trim().orEmpty()
@@ -352,10 +618,14 @@ private fun keyAndroidView(
                 webView.loadUrl(pageUrl, headers)
             } else {
                 webView.evaluateJavascript(PLAYER_CHROME_JS, null)
+                // Quality / candidate meta changed on same URL — re-probe.
+                val hl = if (hasListenState == true) 1 else 0
+                webView.evaluateJavascript(audioProbeJs(qualityState, candState, hl), null)
             }
         },
         onRelease = { webView ->
             webView.stopLoading()
+            runCatching { webView.removeJavascriptInterface("FalcorAudioProbe") }
         }
     )
 }

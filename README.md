@@ -3,10 +3,11 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.19**
+Version: **0.1.20**
 
-## Features (0.1.19)
+## Features (0.1.20)
 
+- **Diagnostic probe for listen audio (0.1.20)** — after live WebView playing (+ ~2s), Snackbar + `Log.i("FalcorAudioProbe")` report src/quality/pathKind/muted/volume/tracks (probe-only; no StreamQuality/mute product changes).
 - **Native HTML5 controls (0.1.19)** — live WebView leaves the native control bar **visible** (`controls=true`); do not CSS-hide `::-webkit-media-controls*`. Default muted is fine; user unmutes via the HTML5 bar. Removed AppBar mute IconButton, Tap-for-sound overlay, `__falcorMuted` / `applyMute` storms, and volumechange re-sync that fought the page.
 - **Live listen audio** — WebView play + `STREAM_MUSIC` / `AudioFocusRequest`; mute state owned by native controls only. Minimal chrome JS (black background / object-fit) does not strip controls or force mute.
 - **Push-to-talk** — broader Reolink/ONVIF/backchannel/opus talk detection; mic grant only while talking; while talking never falls through to ExoPlayer.

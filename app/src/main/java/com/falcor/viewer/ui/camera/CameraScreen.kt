@@ -262,6 +262,9 @@ fun CameraScreen(
                             state = state,
                             viewModel = viewModel,
                             isLandscape = isLandscape,
+                            onAudioProbe = { line ->
+                                scope.launch { snackbarHostState.showSnackbar(line) }
+                            },
                             modifier = Modifier.fillMaxWidth()
                         )
                         if (state.talking) {
@@ -399,7 +402,7 @@ fun CameraScreen(
     }
 
     if (state.fullscreen) {
-        FullscreenLiveDialog(state = state, viewModel = viewModel)
+        FullscreenLiveDialog(state = state, viewModel = viewModel, onAudioProbe = { line -> scope.launch { snackbarHostState.showSnackbar(line) } })
     }
 
     if (state.ptzSheetOpen && state.ptzSupported) {
@@ -479,6 +482,7 @@ private fun LiveOrClipSurface(
     state: CameraUiState,
     viewModel: CameraViewModel,
     isLandscape: Boolean,
+    onAudioProbe: (String) -> Unit,
     modifier: Modifier = Modifier,
     fill: Boolean = false
 ) {
@@ -515,6 +519,9 @@ private fun LiveOrClipSurface(
                                 fillAspect = false,
                                 showDetections = false,
                                 allowMicrophone = true,
+                                qualityLabel = state.quality.name,
+                                hasListenAudio = state.capabilities?.hasListenAudio,
+                                onAudioProbe = onAudioProbe,
                                 onAllFailed = { viewModel.onTalkWebRtcFailed() },
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -539,6 +546,9 @@ private fun LiveOrClipSurface(
                             fillAspect = false,
                             showDetections = false,
                             allowMicrophone = false,
+                            qualityLabel = state.quality.name,
+                            hasListenAudio = state.capabilities?.hasListenAudio,
+                            onAudioProbe = onAudioProbe,
                             onAllFailed = { viewModel.onWebViewLiveFailed() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -606,7 +616,8 @@ private fun LiveOrClipSurface(
 @Composable
 private fun FullscreenLiveDialog(
     state: CameraUiState,
-    viewModel: CameraViewModel
+    viewModel: CameraViewModel,
+    onAudioProbe: (String) -> Unit
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -648,6 +659,7 @@ private fun FullscreenLiveDialog(
                 state = state,
                 viewModel = viewModel,
                 isLandscape = true,
+                onAudioProbe = onAudioProbe,
                 fill = true,
                 modifier = Modifier.fillMaxSize()
             )
