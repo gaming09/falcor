@@ -90,7 +90,7 @@ fun FrigateLiveWebView(
     showDetections: Boolean = true,
     /** When true, WebView may request mic/camera for go2rtc talk. */
     allowMicrophone: Boolean = false,
-    /** Compose-driven mute — injects JS on <video>/<audio> (HTML speaker is stripped). */
+    /** Compose-driven mute — injects JS on <video>/<audio>; HTML5 controls stay visible. */
     muted: Boolean = false,
     audioController: WebViewAudioController? = null,
     onPlaying: (() -> Unit)? = null,
@@ -183,7 +183,7 @@ fun FrigateLiveWebView(
     }
 }
 
-/** Strip HTML5/Frigate chrome; pointer-events:none so Compose overlay owns taps. */
+/** Hide go2rtc/Frigate page chrome only — keep native HTML5 video controls visible + tappable. */
 private const val PLAYER_CHROME_JS = """
 (function(){
   function stylePlayer(){
@@ -192,27 +192,21 @@ private const val PLAYER_CHROME_JS = """
         var s = document.createElement('style');
         s.id = 'falcor-player-css';
         s.textContent = [
-          'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;pointer-events:none!important;}',
-          '*{pointer-events:none!important;}',
-          'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;position:fixed!important;inset:0!important;z-index:1!important;pointer-events:none!important;}',
-          'video::-webkit-media-controls{display:none!important;}',
-          'video::-webkit-media-controls-enclosure{display:none!important;}',
-          'video::-webkit-media-controls-panel{display:none!important;}',
-          'video::-webkit-media-controls-start-playback-button{display:none!important;}',
-          'video::-webkit-media-controls-mute-button{display:none!important;}',
-          'video::-webkit-media-controls-volume-slider{display:none!important;}',
-          'video::-webkit-media-controls-overlay-play-button{display:none!important;}',
+          'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;}',
+          'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;position:fixed!important;inset:0!important;z-index:1!important;pointer-events:auto!important;}',
+          'video::-webkit-media-controls,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-panel{display:flex!important;opacity:1!important;visibility:visible!important;pointer-events:auto!important;}',
+          'video::-webkit-media-controls-mute-button,video::-webkit-media-controls-volume-slider,video::-webkit-media-controls-timeline,video::-webkit-media-controls-current-time-display,video::-webkit-media-controls-time-remaining-display,video::-webkit-media-controls-play-button{pointer-events:auto!important;opacity:1!important;visibility:visible!important;}',
           'audio{display:none!important;}',
-          'nav,aside,header,footer,[class*=sidebar],[class*=history],[class*=History],[class*=timeline],[class*=Timeline],[class*=review],[id*=sidebar]{display:none!important;visibility:hidden!important;width:0!important;height:0!important;}',
-          '.vjs-control-bar,.video-js .vjs-big-play-button,button.play,[class*=control],[class*=Controls],.plyr__controls,[class*=mute],[class*=Mute],[class*=volume],[class*=Volume],.mute-button,.volume-button,button,a,[role=button]{display:none!important;opacity:0!important;pointer-events:none!important;visibility:hidden!important;}'
+          'nav,aside,header,footer,[class*=sidebar],[class*=history],[class*=History],[class*=timeline],[class*=Timeline],[class*=review],[id*=sidebar]{display:none!important;visibility:hidden!important;width:0!important;height:0!important;}'
         ].join('');
         (document.head || document.documentElement).appendChild(s);
       }
       var muted = !!window.__falcorMuted;
       document.querySelectorAll('video,audio').forEach(function(v){
         try {
-          v.removeAttribute('controls');
-          v.controls = false;
+          // Keep native HTML5 control bar (mute works there); re-assert so pages cannot strip it.
+          v.controls = true;
+          v.setAttribute('controls','');
           v.setAttribute('playsinline','');
           v.setAttribute('webkit-playsinline','');
           v.muted = muted;
@@ -244,8 +238,9 @@ internal fun applyMuteJs(muted: Boolean): String = """
   window.__falcorMuted = wantMuted;
   function applyMedia(v){
     try {
-      v.removeAttribute('controls');
-      v.controls = false;
+      // Never strip HTML5 controls — native mute bar is the reliable unmute path.
+      v.controls = true;
+      v.setAttribute('controls','');
       v.setAttribute('playsinline','');
       v.setAttribute('webkit-playsinline','');
       v.muted = wantMuted;
@@ -314,10 +309,10 @@ private fun keyAndroidView(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
-                // Compose overlay owns taps (Falcor mute bar); never open Frigate SPA chrome.
-                isClickable = false
-                isFocusable = false
-                isFocusableInTouchMode = false
+                // Allow touches to reach native HTML5 media controls (Compose overlay leaves bottom gap).
+                isClickable = true
+                isFocusable = true
+                isFocusableInTouchMode = true
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
@@ -369,7 +364,7 @@ private fun keyAndroidView(
                             "var s2=document.createElement('style');s2.innerHTML='canvas,.bounding-box,[class*=detect]{display:none!important;}';document.head.appendChild(s2);"
                         } else ""
                         view?.evaluateJavascript(
-                            "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;}video::-webkit-media-controls{display:none!important;}';document.head.appendChild(s);$hideBoxes})();",
+                            "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;pointer-events:auto!important;}';document.head.appendChild(s);$hideBoxes})();",
                             null
                         )
                         // Start unmuted unless Compose says muted; autoplay-with-sound may still

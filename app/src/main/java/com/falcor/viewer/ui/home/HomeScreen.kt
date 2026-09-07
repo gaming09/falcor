@@ -55,6 +55,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.clickable
+import com.falcor.viewer.BuildConfig
 import com.falcor.viewer.R
 import com.falcor.viewer.data.model.CameraUiModel
 import com.falcor.viewer.player.OkHttpLivePreview
@@ -95,6 +96,14 @@ fun HomeScreen(
                 title = {
                     Column {
                         Text(stringResource(R.string.home_title))
+                        Text(
+                            stringResource(
+                                R.string.app_version_label,
+                                BuildConfig.VERSION_NAME
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         if (state.cameras.isNotEmpty()) {
                             Text(
                                 stringResource(R.string.home_grid_cameras, state.cameras.size),

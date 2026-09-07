@@ -12,7 +12,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,8 +49,6 @@ import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -73,7 +70,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -105,13 +101,11 @@ import com.falcor.viewer.player.FrigateLiveWebView
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.foundation.layout.heightIn
 import com.falcor.viewer.cast.CastOutcome
-import com.falcor.viewer.player.WebViewAudioController
 import com.falcor.viewer.player.OkHttpLivePreview
 import com.falcor.viewer.player.VlcPlayer
 import com.falcor.viewer.ui.components.ErrorRetry
 import com.falcor.viewer.ui.player.DetectionOverlay
 import com.falcor.viewer.ui.player.ZoomableBox
-import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
 @Composable
@@ -132,7 +126,6 @@ fun CameraScreen(
     val castStarted = stringResource(R.string.cast_started)
     val castNoDevice = stringResource(R.string.cast_no_device)
     val castAuthWarning = stringResource(R.string.cast_auth_url_warning)
-    val audioController = remember { WebViewAudioController() }
     var pendingTalkAfterPermission by remember { mutableStateOf(false) }
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -204,23 +197,6 @@ fun CameraScreen(
                         )
                     }
                     IconButton(onClick = {
-                        val nextMuted = !state.audioMuted
-                        // Native WebRTC/ExoPlayer mute via state; WebView needs JS on gesture.
-                        val onWebView = state.talking || state.useWebViewLive
-                        if (onWebView) {
-                            audioController.applyMute(nextMuted)
-                        }
-                        viewModel.setAudioMuted(nextMuted)
-                    }) {
-                        Icon(
-                            if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                            contentDescription = stringResource(
-                                if (state.audioMuted) R.string.camera_unmute
-                                else R.string.camera_mute
-                            )
-                        )
-                    }
-                    IconButton(onClick = {
                         val url = viewModel.castStreamUrl()
                         val mime = if (url.contains("m3u8", true))
                             "application/x-mpegURL" else "video/x-motion-jpeg"
@@ -276,7 +252,6 @@ fun CameraScreen(
                             state = state,
                             viewModel = viewModel,
                             isLandscape = isLandscape,
-                            audioController = audioController,
                             modifier = Modifier.fillMaxWidth()
                         )
                         if (state.talking) {
@@ -412,7 +387,7 @@ fun CameraScreen(
     }
 
     if (state.fullscreen) {
-        FullscreenLiveDialog(state = state, viewModel = viewModel, audioController = audioController)
+        FullscreenLiveDialog(state = state, viewModel = viewModel)
     }
 
     if (state.ptzSheetOpen && state.ptzSupported) {
@@ -492,8 +467,7 @@ private fun LiveOrClipSurface(
     viewModel: CameraViewModel,
     isLandscape: Boolean,
     modifier: Modifier = Modifier,
-    fill: Boolean = false,
-    audioController: WebViewAudioController? = null
+    fill: Boolean = false
 ) {
     val aspectMod = if (fill) {
         modifier.fillMaxSize()
@@ -503,17 +477,6 @@ private fun LiveOrClipSurface(
             .then(if (isLandscape) Modifier.height(220.dp) else Modifier.aspectRatio(16f / 9f))
     }
     val webUrls = state.activeWebViewUrls.ifEmpty { state.livePageUrls }
-    val showPlayerChrome = state.isLive &&
-        state.authenticatedClipUrl.isNullOrBlank() &&
-        !state.talking
-    var controlsVisible by remember { mutableStateOf(false) }
-    var controlsEpoch by remember { mutableIntStateOf(0) }
-    LaunchedEffect(controlsVisible, controlsEpoch) {
-        if (controlsVisible) {
-            delay(3_000)
-            controlsVisible = false
-        }
-    }
     Box(modifier = aspectMod.background(Color.Black)) {
         ZoomableBox(modifier = Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize()) {
@@ -538,7 +501,6 @@ private fun LiveOrClipSurface(
                             showDetections = false,
                             allowMicrophone = true,
                             muted = false,
-                            audioController = audioController,
                             onAllFailed = { viewModel.onTalkWebRtcFailed() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -551,8 +513,7 @@ private fun LiveOrClipSurface(
                             fillAspect = false,
                             showDetections = false,
                             allowMicrophone = false,
-                            muted = state.audioMuted,
-                            audioController = audioController,
+                            muted = false,
                             onAllFailed = { viewModel.onWebViewLiveFailed() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -562,7 +523,7 @@ private fun LiveOrClipSurface(
                         Go2rtcWebRtcPlayer(
                             webrtcPostUrls = state.webrtcPostUrls,
                             okHttpClient = viewModel.httpClient(),
-                            mute = state.audioMuted,
+                            mute = false,
                             onAllFailed = { viewModel.onNativeWebRtcFailed() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -572,7 +533,7 @@ private fun LiveOrClipSurface(
                         AuthenticatedLivePlayer(
                             streamUrl = state.mediaUrl,
                             okHttpClient = viewModel.httpClient(),
-                            mute = state.audioMuted,
+                            mute = false,
                             onError = { viewModel.onStreamError() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -589,7 +550,7 @@ private fun LiveOrClipSurface(
                         VlcPlayer(
                             mediaUrl = state.mediaUrl,
                             headers = viewModel.authHeaders(),
-                            mute = state.audioMuted,
+                            mute = false,
                             onError = { viewModel.onStreamError() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -612,65 +573,6 @@ private fun LiveOrClipSurface(
                         contentAspectRatio = ar
                     )
                 }
-                // Tap catcher above WebView — Falcor chrome, not Frigate history SPA.
-                if (showPlayerChrome) {
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .clickable {
-                                controlsVisible = !controlsVisible
-                                if (controlsVisible) controlsEpoch++
-                            }
-                    )
-                }
-                if (showPlayerChrome && controlsVisible) {
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .background(Color(0xCC000000))
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Start
-                    ) {
-                        IconButton(
-                            onClick = {
-                                val nextMuted = !state.audioMuted
-                                val onWebView = state.useWebViewLive
-                                if (onWebView) {
-                                    audioController?.applyMute(nextMuted)
-                                }
-                                viewModel.setAudioMuted(nextMuted)
-                                controlsEpoch++
-                            }
-                        ) {
-                            Icon(
-                                if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                                contentDescription = stringResource(
-                                    if (state.audioMuted) R.string.camera_unmute
-                                    else R.string.camera_mute
-                                ),
-                                tint = Color.White
-                            )
-                        }
-                        Text(
-                            text = stringResource(
-                                if (state.audioMuted) R.string.camera_unmute
-                                else R.string.camera_mute
-                            ),
-                            color = Color.White,
-                            style = MaterialTheme.typography.labelLarge,
-                            modifier = Modifier.clickable {
-                                val nextMuted = !state.audioMuted
-                                if (state.useWebViewLive) {
-                                    audioController?.applyMute(nextMuted)
-                                }
-                                viewModel.setAudioMuted(nextMuted)
-                                controlsEpoch++
-                            }
-                        )
-                    }
-                }
             }
         }
     }
@@ -679,8 +581,7 @@ private fun LiveOrClipSurface(
 @Composable
 private fun FullscreenLiveDialog(
     state: CameraUiState,
-    viewModel: CameraViewModel,
-    audioController: WebViewAudioController
+    viewModel: CameraViewModel
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -723,7 +624,6 @@ private fun FullscreenLiveDialog(
                 viewModel = viewModel,
                 isLandscape = true,
                 fill = true,
-                audioController = audioController,
                 modifier = Modifier.fillMaxSize()
             )
             if (state.talking) {
@@ -737,27 +637,6 @@ private fun FullscreenLiveDialog(
                         .padding(horizontal = 12.dp, vertical = 4.dp),
                     color = Color.White,
                     style = MaterialTheme.typography.labelMedium
-                )
-            }
-            IconButton(
-                onClick = {
-                    val nextMuted = !state.audioMuted
-                    val onWebView = state.talking || state.useWebViewLive
-                    if (onWebView) {
-                        audioController.applyMute(nextMuted)
-                    }
-                    viewModel.setAudioMuted(nextMuted)
-                },
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(16.dp)
-            ) {
-                Icon(
-                    if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                    contentDescription = stringResource(
-                        if (state.audioMuted) R.string.camera_unmute else R.string.camera_mute
-                    ),
-                    tint = Color.White
                 )
             }
             IconButton(

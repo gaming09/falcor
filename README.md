@@ -3,12 +3,13 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.13**
+Version: **0.1.14**
 
-## Features (0.1.13)
+## Features (0.1.14)
 
-- **Tap → Falcor mute bar** — tap the live picture for a short-lived Falcor chrome bar (mute/unmute); WebView embeds never use Frigate `#cameras/` SPA (no history sidebar). Mute only toggles `video`/`audio` + `AudioContext` (no DOM mute clicks that flipped the stream).
-- **WebView-primary live** — go2rtc/Frigate HTML embeds only (`live/webrtc/webrtc.html`, `api/go2rtc/webrtc.html` / `stream.html`, `mse.html` with `media=video+audio`). Native WebRTC / ExoPlayer HLS / VLC demoted after WebView exhausts; OkHttp MJPEG last. Audio path unchanged from 0.1.12.
+- **Static HTML5 video mute** — live WebView keeps the native bottom control bar always visible after load; CSS/JS no longer strips `::-webkit-media-controls` or forces `controls=false`. Mute/unmute is **only** via that HTML5 bar (app-bar / Falcor overlay mute chrome removed).
+- **Version in UI** — home app bar and connect screen show `Falcor {VERSION_NAME}` from `BuildConfig`.
+- **WebView-primary live** — go2rtc/Frigate HTML embeds only (`live/webrtc/webrtc.html`, `api/go2rtc/webrtc.html` / `stream.html`, `mse.html` with `media=video+audio`). Native WebRTC / ExoPlayer HLS / VLC demoted after WebView exhausts; OkHttp MJPEG last.
 - **Detections** — eye toggles Compose `DetectionOverlay` only (detect w/h letterbox from `/api/config`); never swaps the live embed URL to Frigate SPA.
 - **Larger Hold to talk** — centered under History (not in the chip row); PTZ chip stays near stream controls. Detections eye uses on/off contentDescriptions.
 - **Cast via MediaRouter** — if no Cast session, opens the system route picker with a snackbar; prefers unauthenticated `http://{host}:5000/api/...` HLS/MJPEG when Frigate base is `:8971` (Chromecast cannot send JWT).
@@ -16,8 +17,8 @@ Version: **0.1.13**
 - **Smoother camera enable/disable** — optimistic Switch, disabled while in-flight, soft merge by name (no full-grid refresh flash / scroll jump).
 - **Smarter config scan** on login / home refresh — deep rule-based analysis of `GET /api/config` (+ `GET /api/go2rtc/streams` keys): maps live / talk / PTZ / listen-audio per camera; listen audio still detected when talk is missing; prefers live stream names; heuristics documented below.
 - **Home camera enable/disable** — Frigate WebSocket `{camera}/enabled/set` with `ON`/`OFF`, HTTP PUT fallback, home keeps WS connected, snackbar on failure.
-- **Press-and-hold talk (Frigate-style)** — same live frame, WebRTC `media=video+audio+microphone`, no HTML player chrome.
-- **Live listen audio** — native WebRTC AudioTrack mute; WebView talk uses `media=video+audio+microphone`.
+- **Press-and-hold talk (Frigate-style)** — same live frame, WebRTC `media=video+audio+microphone`.
+- **Live listen audio** — HTML5 control-bar mute on WebView live; native fallbacks play unmuted.
 - Pinch-zoom, stronger PTZ, clips, dashboards, Cast.
 
 ## Requirements
@@ -63,7 +64,7 @@ Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… list
 
 ### Live path
 
-1. **WebView** — go2rtc/Frigate embed pages only (`live/webrtc/webrtc.html?media=video+audio`, go2rtc `webrtc.html` / `stream.html`, MSE). Never Frigate `#cameras/` SPA. Auth cookie/JWT injected. Mute via `applyMuteJs` / `WebViewAudioController` on user gesture (media elements + AudioContext only).
+1. **WebView** — go2rtc/Frigate embed pages only (`live/webrtc/webrtc.html?media=video+audio`, go2rtc `webrtc.html` / `stream.html`, MSE). Never Frigate `#cameras/` SPA. Auth cookie/JWT injected. Native HTML5 `controls` stay on; mute via that bar.
 2. ExoPlayer authenticated HLS (`/api/go2rtc/stream.m3u8?src=`) — after WebView exhausts; mute via `player.volume`
 3. LibVLC on remaining HLS/MJPEG/RTSP candidates (volume 0/100)
 4. Optional native WebRTC (`POST /api/go2rtc/webrtc`) — demoted; kept for experiments / fallback flags
@@ -77,11 +78,11 @@ Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… list
 
 Press and hold **Hold to talk** (large button centered under History). Falcor:
 
-1. Keeps the same black WebView frame (no ugly HTML5 player chrome).
+1. Keeps the same black WebView frame (native HTML5 controls stay available).
 2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks).
 3. Grants WebView `AUDIO_CAPTURE` via `WebChromeClient.onPermissionRequest`.
-4. Injects CSS/JS to strip `controls` and autoplay.
-5. On release, restores WebView-primary live listen (Compose mute → JS).
+4. Injects CSS/JS for page chrome cleanup + autoplay; re-asserts `video.controls = true`.
+5. On release, restores WebView-primary live listen (HTML5 mute remains the mute UX).
 
 **Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio. If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera.
 
@@ -130,13 +131,13 @@ Tap Cast on the camera screen. If no Cast session is connected, Falcor opens the
 
 ### Live audio mute
 
-The app-bar speaker button drives **WebRTC AudioTrack** enable/volume on the native live path (and ExoPlayer volume on HLS fallback). When talk/live is on WebView, the same click also runs `WebViewAudioController.applyMute` (user-gesture unmute+play).
+Mute/unmute is **only** via the native **HTML5 video control bar** on WebView live embeds (always kept visible). Compose app-bar and overlay mute buttons were removed in 0.1.14.
 
 ## Known limits
 
 - **Dashboard Cast:** not implemented — only the focused camera stream is castable.
 - **Cast + JWT:** Default Media Receiver cannot send Frigate auth headers. Falcor rewrites `:8971` bases to `http://{host}:5000/api/...` for Cast when possible; if your Frigate API is not open on :5000, Cast may fail — use placeholders like `http://frigate.example:5000` in docs, never real LAN IPs.
-- **Mute + autoplay:** Native WebRTC unmute is immediate via AudioTrack. WebView talk/fallback may still need a mute-button tap for unmuted autoplay.
+- **Mute + autoplay:** Use the HTML5 control-bar mute on WebView live (stays after load). Unmuted autoplay may still require a tap on that native mute control.
 - **Talk:** depends on Frigate go2rtc talk/onvif/reolink audio; app grants WebView mic but cannot fix missing server talk config.
 - **Detection boxes:** depend on Frigate WS payloads; some versions expose richer data in the web UI only.
 - **WebView live:** uses go2rtc HTML players Frigate already ships; if those routes 404, Falcor falls back automatically.

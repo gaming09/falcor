@@ -68,7 +68,7 @@ data class CameraUiState(
     val scrubTimestamp: Double? = null,
     val fullscreen: Boolean = false,
     val showDetections: Boolean = false,
-    /** Live listen mute — independent of WebView HTML chrome (stripped). Default unmuted. */
+    /** Legacy field; Compose mute chrome removed in 0.1.14 — HTML5 bar owns mute. */
     val audioMuted: Boolean = false,
     val detectionBoxes: List<DetectionBox> = emptyList(),
     val error: Boolean = false
@@ -226,7 +226,7 @@ class CameraViewModel(
         _state.update { it.copy(fullscreen = open) }
     }
 
-    /** Mute only — never touch livePageUrls / mediaUrl / quality. */
+    /** No-op retained for binary compatibility; mute is HTML5-only in 0.1.14. */
     fun setAudioMuted(muted: Boolean) {
         _state.update { it.copy(audioMuted = muted) }
     }

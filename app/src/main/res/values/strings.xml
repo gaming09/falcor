@@ -2,6 +2,7 @@
 <resources>
     <string name="app_name">Falcor</string>
     <string name="app_tagline">Frigate Viewer</string>
+    <string name="app_version_label">Falcor %1$s</string>
 
     <!-- Login / Setup -->
     <string name="login_title">Connect to Frigate</string>

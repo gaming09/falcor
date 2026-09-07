@@ -28,6 +28,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.falcor.viewer.BuildConfig
 import com.falcor.viewer.R
 
 @Composable
@@ -59,6 +60,11 @@ fun LoginScreen(
             stringResource(R.string.app_tagline),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            stringResource(R.string.app_version_label, BuildConfig.VERSION_NAME),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(28.dp))
         Text(stringResource(R.string.login_title), style = MaterialTheme.typography.titleLarge)
@@ -134,5 +140,11 @@ fun LoginScreen(
                 Text(stringResource(R.string.login_connect))
             }
         }
+        Spacer(Modifier.height(32.dp))
+        Text(
+            stringResource(R.string.app_version_label, BuildConfig.VERSION_NAME),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
