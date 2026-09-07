@@ -454,6 +454,20 @@ val LISTEN_AUDIO_MARKERS = listOf(
     "microphone"
 )
 
+/** Explicit video publish markers in go2rtc source strings. */
+val VIDEO_SOURCE_MARKERS = listOf(
+    "#video=",
+    "video=copy",
+    "video=h264",
+    "video=h265",
+    "video=hevc",
+    "video=avc",
+    "codec=h264",
+    "codec=h265",
+    "codec=hevc",
+    "codec=avc1"
+)
+
 /** live.streams role names that Frigate uses for WebRTC / listen audio (e.g. "WebRTC Audio"). */
 private val LISTEN_ROLE_MARKERS = listOf("webrtc", "audio", "listen")
 
@@ -476,6 +490,71 @@ fun sourcesHaveListenAudio(sources: List<String>): Boolean =
         LISTEN_AUDIO_MARKERS.any { lower.contains(it) } ||
             (lower.contains("ffmpeg:") && lower.contains("audio"))
     }
+
+/**
+ * Video signal for live playback: explicit `#video=` / video codecs, OR a plain publish URL
+ * (`rtsp://`, `http(s)://`, …). Do **not** require `#video=` on plain RTSP (roaming*).
+ * `ffmpeg:Name#audio=opus` alone is not video.
+ */
+fun sourceHasVideoSignal(src: String): Boolean {
+    val lower = src.lowercase().trim()
+    if (lower.isEmpty()) return false
+    if (VIDEO_SOURCE_MARKERS.any { lower.contains(it) }) return true
+    if (lower.startsWith("rtsp://") || lower.startsWith("rtsps://") ||
+        lower.startsWith("http://") || lower.startsWith("https://") ||
+        lower.startsWith("rtmp://") || lower.startsWith("httpx://")
+    ) {
+        return true
+    }
+    // ffmpeg pulling an embedded RTSP/HTTP input usually carries video
+    if (lower.contains("ffmpeg:") && (
+            lower.contains("rtsp://") || lower.contains("rtsps://") ||
+                lower.contains("http://") || lower.contains("https://")
+            )
+    ) {
+        return true
+    }
+    return false
+}
+
+fun sourcesHaveVideoSignal(sources: List<String>): Boolean =
+    sources.any { sourceHasVideoSignal(it) }
+
+/**
+ * Audio-only go2rtc helper (typical `*_webrtc` / "WebRTC Audio"): has listen/audio markers
+ * but no video signal — e.g. `ffmpeg:KidsRoom#audio=opus`.
+ */
+fun sourceIsAudioOnlyHelper(src: String): Boolean {
+    val lower = src.lowercase()
+    val hasAudio = LISTEN_AUDIO_MARKERS.any { lower.contains(it) } ||
+        (lower.contains("ffmpeg:") && lower.contains("audio"))
+    if (!hasAudio) return false
+    return !sourceHasVideoSignal(src)
+}
+
+fun sourcesAreAudioOnly(sources: List<String>): Boolean {
+    if (sources.isEmpty()) return false // unknown — do not skip
+    return sources.any { sourceIsAudioOnlyHelper(it) } && !sourcesHaveVideoSignal(sources)
+}
+
+/** True when go2rtc sources for [streamName] are an audio-only sidecar (not live video). */
+fun isAudioOnlyGo2rtcStream(streamName: String, go2rtc: Go2RtcConfig?): Boolean {
+    val sources = go2rtc?.sourceStrings(streamName).orEmpty()
+    return sourcesAreAudioOnly(sources)
+}
+
+/** A/V + listen: video signal AND listen/audio markers on the same stream key. */
+fun isAvListenCapableStream(streamName: String, go2rtc: Go2RtcConfig?): Boolean {
+    val sources = go2rtc?.sourceStrings(streamName).orEmpty()
+    if (sources.isEmpty()) return false
+    return sourcesHaveVideoSignal(sources) && sourcesHaveListenAudio(sources)
+}
+
+/** Usable as live WebView video `?src=` — excludes audio-only helpers. */
+fun isUsableLiveVideoSrc(streamName: String, go2rtc: Go2RtcConfig?): Boolean {
+    if (streamName.isBlank()) return false
+    return !isAudioOnlyGo2rtcStream(streamName, go2rtc)
+}
 
 /** True if role, stream key, or go2rtc sources look listen-capable. */
 fun isListenCapableStream(
@@ -555,7 +634,7 @@ fun deriveCameraCapabilities(
     val listen = detectListenAudio(name, camera, go2rtc, streams, talkCapable = talk)
     val vendors = detectVendorHints(camera, go2rtc, streams)
     val liveName = resolvePreferredLiveStreamName(
-        name, camera, streams, go2rtc?.streamKeys.orEmpty(), preferSub = true, go2rtc = go2rtc
+        name, camera, streams, go2rtc?.streamKeys.orEmpty(), preferSub = false, go2rtc = go2rtc
     )
     val detectW = camera.detect?.width?.takeIf { it > 0 }
     val detectH = camera.detect?.height?.takeIf { it > 0 }
@@ -583,15 +662,16 @@ fun deriveCameraCapabilities(
 }
 
 /**
- * Prefer listen-capable live src (WebRTC Audio / *_webrtc / LISTEN markers), then main/sub by
- * [preferSub]. Never hardcode camera names. Used for live WebView `?src=` and capability cache.
+ * Prefer listen-capable **A/V** live src for the video WebView, then main/sub by [preferSub].
+ * Skips audio-only go2rtc helpers (`ffmpeg:…#audio=…` without video / plain `*_webrtc`
+ * sidecars / "WebRTC Audio" roles). Never hardcode camera names.
  */
 fun resolvePreferredLiveStreamName(
     cameraName: String,
     camera: CameraConfig,
     streamNames: List<String>,
     go2rtcKeys: Set<String>,
-    preferSub: Boolean = true,
+    preferSub: Boolean = false,
     go2rtc: Go2RtcConfig? = null
 ): String {
     val roleMap = camera.live?.streams.orEmpty()
@@ -608,46 +688,14 @@ fun resolvePreferredLiveStreamName(
     fun acceptKey(name: String): Boolean =
         name.isNotBlank() && (go2rtcKeys.isEmpty() || name in go2rtcKeys)
 
-    // --- 1a) Roles whose *name* is webrtc/audio/listen (e.g. "WebRTC Audio") — strongest ---
-    val listenNamedRoles = roleMap.entries.mapNotNull { (role, raw) ->
-        val value = raw.trim().takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-        if (!roleLooksListenCapable(role)) return@mapNotNull null
-        if (!acceptKey(value)) return@mapNotNull null
-        role to value
-    }
-    if (listenNamedRoles.isNotEmpty()) {
-        val qualityHit = listenNamedRoles.firstOrNull { (role, value) ->
-            roleMatchesQuality(role, value, preferSub)
-        }
-        if (qualityHit != null) return qualityHit.second
-        // Shared "WebRTC Audio" (no main/sub in role/value) — use for both qualities.
-        val generic = listenNamedRoles.firstOrNull { (role, value) ->
-            !roleMatchesQuality(role, value, sub = true) &&
-                !roleMatchesQuality(role, value, sub = false)
-        }
-        if (generic != null) return generic.second
-        return listenNamedRoles.first().second
-    }
+    fun usable(name: String): Boolean =
+        acceptKey(name) && isUsableLiveVideoSrc(name, go2rtc)
 
-    // --- 1b) Roles whose value/sources are listen-capable (markers / *_webrtc key) ---
-    val listenValueRoles = roleMap.entries.mapNotNull { (role, raw) ->
-        val value = raw.trim().takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-        if (roleLooksListenCapable(role)) return@mapNotNull null // already handled
-        if (!isListenCapableStream(role = null, streamName = value, go2rtc = go2rtc)) {
-            return@mapNotNull null
-        }
-        if (!acceptKey(value)) return@mapNotNull null
-        role to value
-    }
-    if (listenValueRoles.isNotEmpty()) {
-        val qualityHit = listenValueRoles.firstOrNull { (role, value) ->
-            roleMatchesQuality(role, value, preferSub)
-        }
-        if (qualityHit != null) return qualityHit.second
-        return listenValueRoles.first().second
-    }
+    fun keyMatchesQuality(key: String, sub: Boolean): Boolean =
+        if (sub) key.contains("sub", true)
+        else (key.contains("main", true) && !key.contains("sub", true)) ||
+            key.equals(cameraName, true)
 
-    // --- 2) go2rtc keys for this camera: *_webrtc / listen markers in sources ---
     val relatedKeys = LinkedHashSet<String>().apply {
         streamNames.filter { it.isNotBlank() }.forEach { add(it) }
         roleMap.values.map { it.trim() }.filter { it.isNotEmpty() }.forEach { add(it) }
@@ -659,45 +707,74 @@ fun resolvePreferredLiveStreamName(
         }.forEach { add(it) }
     }.filter { acceptKey(it) }
 
-    val listenKeys = relatedKeys.filter { key ->
-        isListenCapableStream(role = null, streamName = key, go2rtc = go2rtc)
-    }
-    if (listenKeys.isNotEmpty()) {
-        val qualityHit = listenKeys.firstOrNull { key ->
-            if (preferSub) key.contains("sub", true)
-            else key.contains("main", true) && !key.contains("sub", true)
-        }
-        if (qualityHit != null) return qualityHit
-        // Prefer explicit *_webrtc over other listen-ish keys
-        listenKeys.firstOrNull { it.contains("webrtc", true) }?.let { return it }
-        return listenKeys.first()
+    // Role → value pairs that are usable live video (not audio-only sidecars).
+    val usableRoles = roleMap.entries.mapNotNull { (role, raw) ->
+        val value = raw.trim().takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+        if (!usable(value)) return@mapNotNull null
+        role to value
     }
 
-    // --- 3) Classic main/sub role preference (video-only fallback) ---
-    fun pickFromRoles(sub: Boolean): String? {
-        val entry = roleMap.entries.firstOrNull { (role, _) ->
-            if (sub) role.contains("sub", true)
-            else role.contains("main", true) || role.equals("stream", true)
+    // --- 1) Prefer A/V + listen (main/sub with #video=+#audio=, or plain RTSP + audio) ---
+    val avListenRoles = usableRoles.filter { (_, value) ->
+        isAvListenCapableStream(value, go2rtc)
+    }
+    if (avListenRoles.isNotEmpty()) {
+        val qualityHit = avListenRoles.firstOrNull { (role, value) ->
+            roleMatchesQuality(role, value, preferSub)
         }
-        return entry?.value?.trim()?.takeIf { it.isNotEmpty() && acceptKey(it) }
+        if (qualityHit != null) return qualityHit.second
+        // Listen-capable A/V beats video-only sub/main when quality-specific A/V is missing.
+        return avListenRoles.first().second
+    }
+
+    val avListenKeys = relatedKeys.filter { key ->
+        usable(key) && isAvListenCapableStream(key, go2rtc)
+    }
+    if (avListenKeys.isNotEmpty()) {
+        val qualityHit = avListenKeys.firstOrNull { keyMatchesQuality(it, preferSub) }
+        if (qualityHit != null) return qualityHit
+        return avListenKeys.first()
+    }
+
+    // --- 2) Classic main/sub roles (video OK; skip audio-only WebRTC Audio helpers) ---
+    fun pickFromRoles(sub: Boolean): String? {
+        val entry = usableRoles.firstOrNull { (role, value) ->
+            roleMatchesQuality(role, value, sub)
+        }
+        return entry?.second
     }
     val fromRole = if (preferSub) {
         pickFromRoles(sub = true) ?: pickFromRoles(sub = false)
     } else {
-        pickFromRoles(sub = false) ?: pickFromRoles(sub = true) ?: roleMap.values.firstOrNull()?.trim()
+        pickFromRoles(sub = false) ?: pickFromRoles(sub = true)
     }
-    if (!fromRole.isNullOrBlank() && acceptKey(fromRole)) return fromRole
+    if (!fromRole.isNullOrBlank()) return fromRole
+
+    // Any remaining usable role value (e.g. generic "stream") before go2rtc key scan.
+    usableRoles.firstOrNull()?.second?.let { return it }
+
+    // --- 3) Related go2rtc keys that are not audio-only ---
+    val videoKeys = relatedKeys.filter { usable(it) }
+    if (videoKeys.isNotEmpty()) {
+        val qualityHit = videoKeys.firstOrNull { keyMatchesQuality(it, preferSub) }
+        if (qualityHit != null) return qualityHit
+        // Prefer camera primary key over *_webrtc-looking leftovers that somehow passed.
+        videoKeys.firstOrNull { it.equals(cameraName, true) }?.let { return it }
+        videoKeys.firstOrNull { !it.contains("webrtc", true) }?.let { return it }
+        return videoKeys.first()
+    }
 
     val fromNames = when {
-        preferSub && streamNames.any { it.contains("sub", true) } ->
-            streamNames.first { it.contains("sub", true) }
-        !preferSub && streamNames.any { it.contains("main", true) } ->
-            streamNames.first { it.contains("main", true) }
-        else -> streamNames.firstOrNull { !TALK_KEY_MARKERS.any { m -> it.contains(m, true) } }
-            ?: streamNames.firstOrNull()
+        preferSub && streamNames.any { it.contains("sub", true) && usable(it) } ->
+            streamNames.first { it.contains("sub", true) && usable(it) }
+        !preferSub && streamNames.any { it.contains("main", true) && usable(it) } ->
+            streamNames.first { it.contains("main", true) && usable(it) }
+        else -> streamNames.firstOrNull {
+            usable(it) && !TALK_KEY_MARKERS.any { m -> it.contains(m, true) }
+        } ?: streamNames.firstOrNull { usable(it) }
     }
     if (!fromNames.isNullOrBlank()) return fromNames
-    if (cameraName in go2rtcKeys) return cameraName
+    if (usable(cameraName) || cameraName in go2rtcKeys || go2rtcKeys.isEmpty()) return cameraName
     return cameraName
 }
 

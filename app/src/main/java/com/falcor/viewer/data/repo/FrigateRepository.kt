@@ -13,8 +13,10 @@ import com.falcor.viewer.data.model.PtzInfo
 import com.falcor.viewer.data.model.RecordingSegment
 import com.falcor.viewer.data.model.cameraHasListenCapableStream
 import com.falcor.viewer.data.model.deriveCameraCapabilities
-import com.falcor.viewer.data.model.isListenCapableStream
+import com.falcor.viewer.data.model.isUsableLiveVideoSrc
 import com.falcor.viewer.data.model.resolvePreferredLiveStreamName
+import com.falcor.viewer.data.model.roleLooksListenCapable
+import com.falcor.viewer.data.model.streamNameLooksListenCapable
 import com.falcor.viewer.data.model.resolveStreamNames
 import com.falcor.viewer.data.model.toUi
 import com.falcor.viewer.data.prefs.AppPreferences
@@ -532,8 +534,8 @@ class FrigateRepository(
     }
 
     /**
-     * Resolve live `src` with listen-capable preference + [preferSub] every call.
-     * Delegates to [resolvePreferredLiveStreamName] (WebRTC Audio / *_webrtc first).
+     * Resolve live `src` with A/V+listen preference + [preferSub] every call.
+     * Delegates to [resolvePreferredLiveStreamName] (skips audio-only *_webrtc helpers).
      */
     private fun resolvePreferredStreamName(
         camera: String,
@@ -554,32 +556,37 @@ class FrigateRepository(
                 go2rtc = config.go2rtc
             )
         }
-        // Config miss — lightweight fallback (still honors preferSub; no stale caps).
+        // Config miss — lightweight fallback (honors preferSub; skip audio-named sidecars).
+        fun accept(name: String): Boolean =
+            name.isNotBlank() && (go2rtcKeys.isEmpty() || name in go2rtcKeys)
+
         fun pickFromRoles(sub: Boolean): String? {
-            val entry = roleMap.entries.firstOrNull { (role, _) ->
+            val entry = roleMap.entries.firstOrNull { (role, value) ->
+                val v = value.trim()
+                if (!accept(v)) return@firstOrNull false
+                // Without go2rtc sources, skip roles that look like WebRTC Audio sidecars.
+                if (roleLooksListenCapable(role) && streamNameLooksListenCapable(v)) return@firstOrNull false
                 if (sub) role.contains("sub", true)
                 else role.contains("main", true) || role.equals("stream", true)
             }
             return entry?.value?.trim()?.takeIf { it.isNotEmpty() }
         }
-        val listenRole = roleMap.entries.firstOrNull { (role, value) ->
-            isListenCapableStream(role, value.trim(), go2rtc = null)
-        }?.value?.trim()
-        if (!listenRole.isNullOrBlank() && (go2rtcKeys.isEmpty() || listenRole in go2rtcKeys)) {
-            return listenRole
-        }
         val fromRole = if (preferSub) {
             pickFromRoles(sub = true) ?: pickFromRoles(sub = false)
         } else {
-            pickFromRoles(sub = false) ?: pickFromRoles(sub = true) ?: roleMap.values.firstOrNull()?.trim()
+            pickFromRoles(sub = false) ?: pickFromRoles(sub = true) ?: roleMap.values
+                .map { it.trim() }
+                .firstOrNull { accept(it) && !streamNameLooksListenCapable(it) }
         }
-        if (!fromRole.isNullOrBlank() && (go2rtcKeys.isEmpty() || fromRole in go2rtcKeys)) return fromRole
+        if (!fromRole.isNullOrBlank() && accept(fromRole)) return fromRole
         val fromNames = when {
-            preferSub && streamNames.any { it.contains("sub", true) } ->
-                streamNames.first { it.contains("sub", true) }
-            !preferSub && streamNames.any { it.contains("main", true) } ->
-                streamNames.first { it.contains("main", true) }
-            streamNames.isNotEmpty() -> streamNames.first()
+            preferSub && streamNames.any { it.contains("sub", true) && accept(it) } ->
+                streamNames.first { it.contains("sub", true) && accept(it) }
+            !preferSub && streamNames.any { it.contains("main", true) && accept(it) } ->
+                streamNames.first { it.contains("main", true) && accept(it) }
+            streamNames.any { accept(it) && !streamNameLooksListenCapable(it) } ->
+                streamNames.first { accept(it) && !streamNameLooksListenCapable(it) }
+            streamNames.any { accept(it) } -> streamNames.first { accept(it) }
             else -> null
         }
         if (!fromNames.isNullOrBlank()) return fromNames
@@ -626,7 +633,7 @@ class FrigateRepository(
      */
     fun livePlayerPageUrls(
         camera: String,
-        preferSub: Boolean = true,
+        preferSub: Boolean = false,
         streamNames: List<String> = emptyList()
     ): List<String> {
         val base = baseUrl.trimEnd('/')
@@ -634,7 +641,7 @@ class FrigateRepository(
         val go2rtc = config?.go2rtc
         val camCfg = config?.cameras?.get(camera)
         val roleMap = camCfg?.live?.streams.orEmpty()
-        // Always resolve fresh with preferSub + listen preference — never lock to stale caps.liveStreamName.
+        // Always resolve fresh with preferSub + A/V listen preference — never lock to stale caps.
         val preferred = resolvePreferredStreamName(
             camera = camera,
             preferSub = preferSub,
@@ -644,11 +651,13 @@ class FrigateRepository(
             },
             go2rtcKeys = go2rtc?.streamKeys.orEmpty()
         )
-        // Secondary: classic main/sub (no listen boost) so quality chips still vary candidates
-        // when a shared WebRTC Audio role is preferred for both Main and Sub.
+        // Secondary: classic main/sub so quality chips still vary candidates.
         val qualityOnly = run {
             fun pick(sub: Boolean): String? {
-                val entry = roleMap.entries.firstOrNull { (role, _) ->
+                val entry = roleMap.entries.firstOrNull { (role, value) ->
+                    val v = value.trim()
+                    if (v.isEmpty()) return@firstOrNull false
+                    if (!isUsableLiveVideoSrc(v, go2rtc)) return@firstOrNull false
                     if (sub) role.contains("sub", true)
                     else role.contains("main", true) || role.equals("stream", true)
                 }

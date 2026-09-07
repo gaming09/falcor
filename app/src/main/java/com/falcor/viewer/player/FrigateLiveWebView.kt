@@ -52,7 +52,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Grants CAMERA / AUDIO_CAPTURE for getUserMedia (two-way talk)
  * - Minimal chrome JS: black background + object-fit only (does not strip controls or force mute)
  * - 0.1.20-debug: FalcorAudioProbe snackbar + Log.i (probe-only; no product audio changes)
- * - 0.1.21-debug: keep probe; live src selection prefers *_webrtc (see FrigateRepository)
+ * - 0.1.22-debug: keep probe; live src prefers A/V+listen, skips audio-only *_webrtc
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -65,7 +65,7 @@ fun FrigateLiveWebView(
     /** When true, WebView may request mic/camera for go2rtc talk. */
     allowMicrophone: Boolean = false,
     /** MAIN or SUB — included in probe snackbar only. */
-    qualityLabel: String = "SUB",
+    qualityLabel: String = "MAIN",
     /** Caps hasListenAudio hint for probe (0/1); does not gate playback. */
     hasListenAudio: Boolean? = null,
     /** Compact probe line for Snackbar screenshots. */

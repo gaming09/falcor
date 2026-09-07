@@ -49,7 +49,7 @@ data class CameraUiState(
     /** URLs currently loaded in the main live WebView (live or talk). */
     val activeWebViewUrls: List<String> = emptyList(),
     val authenticatedClipUrl: String? = null,
-    val quality: StreamQuality = StreamQuality.SUB,
+    val quality: StreamQuality = StreamQuality.MAIN,
     val isLive: Boolean = true,
     val ptzSupported: Boolean = false,
     val ptzSupportsZoom: Boolean = true,

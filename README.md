@@ -3,12 +3,12 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.21**
+Version: **0.1.22**
 
-## Features (0.1.21)
+## Features (0.1.22)
 
-- **Prefer listen-capable live src (0.1.21)** — `livePlayerPageUrls` / `resolvePreferredStreamName` prefer `live.streams` WebRTC/audio/listen roles and go2rtc `*_webrtc` / `#audio=` markers; Main/Sub always remaps `webrtc.html?src=` (no stale `caps.liveStreamName` lock). Video-only cams (e.g. roaming*) keep video src + snackbar.
-- **Diagnostic probe for listen audio (0.1.20)** — after live WebView playing (+ ~2s), Snackbar + `Log.i("FalcorAudioProbe")` report src/quality/pathKind/muted/volume/tracks (probe-only; no product mute changes). Kept in 0.1.21 to verify `src=*_webrtc`.
+- **Prefer A/V+listen live src (0.1.22)** — live WebView `?src=` prefers go2rtc/main keys with **both** video and audio (`#video=` / plain `rtsp://` **and** `#audio=`/opus/aac). Skips audio-only helpers (`ffmpeg:…#audio=opus` without video — typical `*_webrtc` / "WebRTC Audio"). Main/Sub chips bind to `state.quality` (default MAIN); probe `q=` matches. Video-only cams keep video src + no-listen snackbar.
+- **Diagnostic probe for listen audio (0.1.20)** — after live WebView playing (+ ~2s), Snackbar + `Log.i("FalcorAudioProbe")` report src/quality/pathKind/muted/volume/tracks (probe-only; no product mute changes). Kept to verify A/V src + `vTracks=1`.
 - **Native HTML5 controls (0.1.19)** — live WebView leaves the native control bar **visible** (`controls=true`); do not CSS-hide `::-webkit-media-controls*`. Default muted is fine; user unmutes via the HTML5 bar. Removed AppBar mute IconButton, Tap-for-sound overlay, `__falcorMuted` / `applyMute` storms, and volumechange re-sync that fought the page.
 - **Live listen audio** — WebView play + `STREAM_MUSIC` / `AudioFocusRequest`; mute state owned by native controls only. Minimal chrome JS (black background / object-fit) does not strip controls or force mute.
 - **Push-to-talk** — broader Reolink/ONVIF/backchannel/opus talk detection; mic grant only while talking; while talking never falls through to ExoPlayer.
@@ -63,7 +63,7 @@ On login and home refresh Falcor always fetches `/api/config` and optionally `/a
 | ONVIF host + audio / Reolink vendor + audio | talk capable (broadened in 0.1.17) |
 | `camera.audio.enabled` **or** source `#audio=` / aac / opus / pcm_* **or** talk | `hasListenAudio` (mute/listen OK even without talk) |
 | `camera.onvif` / ptz/info | `showPtz` |
-| Prefer listen-capable `live.streams` (WebRTC/audio/listen / `*_webrtc` / LISTEN markers), then main/sub by quality | `liveStreamName` / live `?src=` |
+| Prefer A/V+listen (`#video=`/rtsp + `#audio=`), skip audio-only `*_webrtc` helpers; then main/sub by quality | `liveStreamName` / live `?src=` |
 
 Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… listen=… liveStream=…`).
 
