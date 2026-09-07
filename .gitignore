@@ -1,6 +1,7 @@
 *.iml
 .gradle/
 /local.properties
+local.properties
 /.idea/
 .DS_Store
 /build/
@@ -17,3 +18,24 @@ bin/
 gen/
 out/
 .kotlin/
+
+# Secrets / credentials — never commit
+.env
+.env.*
+!.env.example
+*.keystore
+*.jks
+*.pem
+*.p12
+secrets/
+**/google-services.json
+**/service-account*.json
+
+# Release signing / local overrides
+keystore.properties
+signing.properties
+*.keystore.properties
+
+# Captured media / screenshots that may contain personal camera names or LAN IPs
+/docs/private/
+**/user-screenshots/

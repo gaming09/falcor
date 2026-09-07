@@ -49,6 +49,8 @@ import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -184,6 +186,15 @@ fun CameraScreen(
                             contentDescription = stringResource(R.string.camera_toggle_detections)
                         )
                     }
+                    IconButton(onClick = viewModel::toggleAudioMuted) {
+                        Icon(
+                            if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                            contentDescription = stringResource(
+                                if (state.audioMuted) R.string.camera_unmute
+                                else R.string.camera_mute
+                            )
+                        )
+                    }
                     IconButton(onClick = {
                         val ok = CastHelper.castStream(
                             context,
@@ -286,6 +297,24 @@ fun CameraScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        AssistChip(
+                            onClick = viewModel::toggleAudioMuted,
+                            label = {
+                                Text(
+                                    stringResource(
+                                        if (state.audioMuted) R.string.camera_unmute
+                                        else R.string.camera_mute
+                                    )
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    if (state.audioMuted) Icons.Default.VolumeOff
+                                    else Icons.Default.VolumeUp,
+                                    contentDescription = null
+                                )
+                            }
+                        )
                         if (state.talkSupported) {
                             HoldTalkButton(
                                 talking = state.talking,
@@ -506,6 +535,7 @@ private fun LiveOrClipSurface(
                             fillAspect = false,
                             showDetections = state.showDetections && !state.talking,
                             allowMicrophone = state.talking,
+                            muted = state.audioMuted && !state.talking,
                             onAllFailed = {
                                 if (state.talking) viewModel.onTalkWebRtcFailed()
                                 else viewModel.onWebViewLiveFailed()
@@ -525,7 +555,7 @@ private fun LiveOrClipSurface(
                         VlcPlayer(
                             mediaUrl = state.mediaUrl,
                             headers = viewModel.authHeaders(),
-                            mute = false,
+                            mute = state.audioMuted,
                             onError = { viewModel.onStreamError() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -598,6 +628,20 @@ private fun FullscreenLiveDialog(
                         .padding(horizontal = 12.dp, vertical = 4.dp),
                     color = Color.White,
                     style = MaterialTheme.typography.labelMedium
+                )
+            }
+            IconButton(
+                onClick = viewModel::toggleAudioMuted,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                    contentDescription = stringResource(
+                        if (state.audioMuted) R.string.camera_unmute else R.string.camera_mute
+                    ),
+                    tint = Color.White
                 )
             }
             IconButton(

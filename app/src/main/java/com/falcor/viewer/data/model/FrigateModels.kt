@@ -246,6 +246,8 @@ data class CameraCapabilities(
     /** Preferred go2rtc stream for live listen (MSE/WebRTC without mic). */
     val liveStreamName: String?,
     val audioEnabled: Boolean,
+    /** Listen-only audio available even when two-way talk is not. */
+    val hasListenAudio: Boolean,
     val streamNames: List<String>,
     val liveRoleMap: Map<String, String>,
     /** Vendor / path hints for logging/UI only. */
@@ -385,6 +387,65 @@ fun detectTalkCapability(
     return false to null
 }
 
+private val LISTEN_AUDIO_MARKERS = listOf(
+    "#audio=",
+    "audio=opus",
+    "audio=aac",
+    "audio=pcma",
+    "audio=pcmu",
+    "audio=any",
+    "codec=opus",
+    "codec=aac",
+    "pcm_alaw",
+    "pcm_mulaw",
+    "#backchannel",
+    "microphone"
+)
+
+/**
+ * Detect listen (one-way) audio even when two-way talk is missing.
+ * Heuristics: camera.audio.enabled, go2rtc source audio codecs / #audio=,
+ * ffmpeg input paths that demux audio, or talk-capable streams (talk implies listen).
+ */
+fun detectListenAudio(
+    cameraName: String,
+    camera: CameraConfig,
+    go2rtc: Go2RtcConfig?,
+    streamNames: List<String>,
+    talkCapable: Boolean
+): Boolean {
+    if (talkCapable) return true
+    if (camera.audio?.enabled == true) return true
+
+    val roleMap = camera.live?.streams.orEmpty()
+    val go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+    val candidateKeys = LinkedHashSet<String>().apply {
+        addAll(streamNames)
+        add(cameraName)
+        go2rtcKeys.filter { it.contains(cameraName, true) }.forEach { add(it) }
+        roleMap.values.map { it.trim() }.filter { it.isNotEmpty() }.forEach { add(it) }
+    }
+
+    for (key in candidateKeys) {
+        val sources = go2rtc?.sourceStrings(key).orEmpty()
+        if (sources.any { src ->
+                val lower = src.lowercase()
+                LISTEN_AUDIO_MARKERS.any { lower.contains(it) } ||
+                    (lower.contains("ffmpeg:") && lower.contains("audio")) ||
+                    TALK_SOURCE_MARKERS.any { lower.contains(it) }
+            }
+        ) {
+            return true
+        }
+    }
+
+    val ffmpegText = camera.ffmpeg?.toString().orEmpty().lowercase()
+    if (ffmpegText.contains("audio") || ffmpegText.contains("-c:a") || ffmpegText.contains("aac")) {
+        return true
+    }
+    return false
+}
+
 /**
  * Build [CameraCapabilities] from cached config + optional [PtzInfo] (ptz/info may 404).
  *
@@ -404,6 +465,7 @@ fun deriveCameraCapabilities(
     val apiSupported = ptzInfo?.isSupported == true
     val showPtz = onvifConfigured || apiSupported
     val (talk, talkStream) = detectTalkCapability(name, camera, go2rtc, streams)
+    val listen = detectListenAudio(name, camera, go2rtc, streams, talkCapable = talk)
     val vendors = detectVendorHints(camera, go2rtc, streams)
     val liveName = resolvePreferredLiveStreamName(name, camera, streams, go2rtc?.streamKeys.orEmpty())
     return CameraCapabilities(
@@ -418,7 +480,8 @@ fun deriveCameraCapabilities(
         showTalk = talk,
         talkStreamName = talkStream ?: (if (talk) liveName else null),
         liveStreamName = liveName,
-        audioEnabled = camera.audio?.enabled == true,
+        audioEnabled = camera.audio?.enabled == true || listen,
+        hasListenAudio = listen,
         streamNames = streams,
         liveRoleMap = camera.live?.streams.orEmpty(),
         vendorHints = vendors,
@@ -454,7 +517,7 @@ fun CameraCapabilities.toUi(): CameraUiModel = CameraUiModel(
     name = name,
     enabled = enabled,
     supportsPtz = showPtz,
-    supportsAudio = showTalk,
+    supportsAudio = showTalk || hasListenAudio || audioEnabled,
     streamNames = streamNames,
     thumbnailUrl = thumbnailUrl,
     capabilities = this

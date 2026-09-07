@@ -1,19 +1,20 @@
 # Falcor — the Frigate Viewer
 
-**Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, review clips, pin dashboards, control PTZ, and cast a single camera stream.
+**Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.7**
+Version: **0.1.8**
 
-## Features (0.1.7)
+## Features (0.1.8)
 
-- **Home camera enable/disable** — Frigate WebSocket `{camera}/enabled/set` with `ON`/`OFF` (same as the web UI), HTTP PUT fallback, home keeps WS connected, snackbar on failure.
-- **Config capability scan on login / resume** — always `GET /api/config` (and optionally `GET /api/go2rtc/streams`) after login and when the app resumes with a saved session. Builds a per-camera map of `liveStreamName` / `talkStreamName` / talk+PTZ flags, persists it, and logs what was detected (no silent “talk unavailable” when config has talk).
-- **Press-and-hold talk (Frigate-style)** — keeps the **same** live player frame (black, no HTML5 controls / play button). On hold, reconnects WebRTC with `media=video+audio+microphone` (prefer dedicated talk stream). On release, restores listen URLs with `media=video+audio`. Thin “Talking…” badge only — never a dialog.
-- **Live listen audio** — default live WebRTC/MSE pages request `media=video+audio`; WebView JS removes `controls`, unmutes, and autoplays.
-- **Pinch-zoom + pan** on all live surfaces and fullscreen.
-- **Stronger PTZ** — hold re-sends MOVE/ZOOM/FOCUS every ~300ms; optional invert pan/tilt.
-- Smooth live WebView → LibVLC → OkHttp MJPEG / snapshot fallback; fullscreen, clips, dashboards, Cast.
+- **Long-press + drag reorder** on the home camera grid — order persisted in DataStore; new cameras append at the end.
+- **Smoother camera enable/disable** — optimistic Switch, disabled while in-flight, soft merge by name (no full-grid refresh flash / scroll jump).
+- **Explicit mute/unmute** on camera detail (app bar + under player + fullscreen) — Compose `VolumeUp`/`VolumeOff` controls live audio independently of stripped WebView chrome (JS mute on `<video>`; VLC volume 0/100).
+- **Smarter config scan** on login / home refresh — deep rule-based analysis of `GET /api/config` (+ `GET /api/go2rtc/streams` keys): maps live / talk / PTZ / listen-audio per camera; listen audio still detected when talk is missing; prefers live stream names; heuristics documented below.
+- **Home camera enable/disable** — Frigate WebSocket `{camera}/enabled/set` with `ON`/`OFF`, HTTP PUT fallback, home keeps WS connected, snackbar on failure.
+- **Press-and-hold talk (Frigate-style)** — same live frame, WebRTC `media=video+audio+microphone`, no HTML player chrome.
+- **Live listen audio** — WebRTC/MSE with `media=video+audio`; WebView JS strips controls and autoplays.
+- Pinch-zoom, stronger PTZ, clips, dashboards, Cast.
 
 ## Requirements
 
@@ -34,15 +35,32 @@ APK: `app/build/outputs/apk/debug/app-debug.apk`
 
 | Setup | Example URL |
 | --- | --- |
-| Local HTTP (unauthenticated) | `http://192.168.1.50:5000` |
-| Authenticated UI port | `https://192.168.1.50:8971` |
+| Local HTTP (unauthenticated) | `http://frigate.example:5000` |
+| Authenticated UI port | `https://frigate.example:8971` |
+
+Use placeholders in docs and screenshots (`camera_front`, `YOUR_TOKEN`). Never commit real LAN IPs, camera names from your site, JWTs, or passwords.
 
 Frigate :8971 uses JWT (not HTTP Basic). Falcor trusts self-signed TLS for local NVR use — do not point at untrusted public hosts expecting the same.
 
+### Config capability scan (heuristics)
+
+On login and home refresh Falcor always fetches `/api/config` and optionally `/api/go2rtc/streams`, then builds a per-camera map (persisted in DataStore). No cloud AI — solid rule-based “understanding”:
+
+| Signal | Result |
+| --- | --- |
+| `camera.live.streams` role/value contains `talk` / `twoway` / `doorbell` | `showTalk`, `talkStreamName` |
+| go2rtc key matching camera + talk markers | talk stream |
+| go2rtc source contains `onvif://`, `reolink://`, `backchannel`, `#audio=opus` | talk capable |
+| `camera.audio.enabled` **or** source `#audio=` / aac / opus / pcm_* **or** talk | `hasListenAudio` (mute/listen OK even without talk) |
+| `camera.onvif` / ptz/info | `showPtz` |
+| Prefer `live.streams` main/sub roles; skip talk-named keys for live | `liveStreamName` |
+
+Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… listen=… liveStream=…`).
+
 ### Live path
 
-1. WebView go2rtc/Frigate live player pages with `media=video+audio` (smooth, unmuted)
-2. LibVLC on config-derived HLS/MJPEG/RTSP candidates (unmuted)
+1. WebView go2rtc/Frigate live player pages with `media=video+audio` (smooth; mute via Compose button)
+2. LibVLC on config-derived HLS/MJPEG/RTSP candidates (volume 0/100 from mute button)
 3. OkHttp MJPEG / snapshot poll (fallback)
 
 ### Two-way talk
@@ -50,18 +68,20 @@ Frigate :8971 uses JWT (not HTTP Basic). Falcor trusts self-signed TLS for local
 Press and hold **Hold to talk** on the camera screen. Falcor:
 
 1. Keeps the same black WebView frame (no ugly HTML5 player chrome).
-2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks with the same `media=`).
+2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks).
 3. Grants WebView `AUDIO_CAPTURE` via `WebChromeClient.onPermissionRequest`.
-4. Injects CSS/JS to strip `controls`, unmute, and autoplay.
+4. Injects CSS/JS to strip `controls` and autoplay.
 5. On release, restores previous live URLs with `media=video+audio` (listen only).
-
-Talk streams are detected at login/resume from go2rtc source strings (`onvif://`, `reolink://`, backchannel, `#audio=opus`) and dedicated talk keys — see Logcat tag `FrigateRepository` for the capability scan summary.
 
 **Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio. If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera.
 
 ### Camera enable / disable
 
-Home grid Switch uses Frigate WS: `{"topic":"<cam>/enabled/set","payload":"ON"|"OFF","retain":false}` (same as Frigate web `useEnabledState`). HTTP `PUT /api/camera/{cam}/set/enabled` is fallback only. Failures show a snackbar and revert the Switch.
+Home grid Switch uses Frigate WS: `{"topic":"<cam>/enabled/set","payload":"ON"|"OFF","retain":false}` (same as Frigate web `useEnabledState`). HTTP `PUT /api/camera/{cam}/set/enabled` is fallback only. Failures show a snackbar and revert the Switch. While a toggle is in-flight the Switch is disabled; success merges only that camera’s flags so previews/scroll stay put.
+
+### Home reorder
+
+Long-press a camera card, then drag to rearrange. Order is stored in DataStore (`camera_order_json`). Refreshing cameras re-applies the saved order; unknown new cameras append at the end.
 
 ### PTZ
 
@@ -87,6 +107,12 @@ app/src/main/java/com/falcor/viewer/
   player/        # Live WebView, Exo clip player, OkHttp preview, LibVLC
   ui/            # home, camera, dashboards, alerts, navigation, player chrome
 ```
+
+## Privacy / secrets
+
+- `.gitignore` excludes `local.properties`, `*.apk`, `*.keystore` / `*.jks`, `.env`, and similar.
+- README and UI examples use placeholders only (`https://frigate.example:8971`, `camera_front`, `YOUR_TOKEN`).
+- Never commit user Frigate credentials, JWTs, or screenshots that expose real camera names / LAN IPs.
 
 ## Known limits
 

@@ -104,8 +104,8 @@ fun VlcPlayer(
         onDispose { mediaPlayer.setEventListener(null) }
     }
 
-    // Re-run whenever the candidate URL changes so fallback advances.
-    LaunchedEffect(mediaUrl, playWhenReady, mute) {
+    // Re-run whenever the candidate URL changes so fallback advances (mute handled separately).
+    LaunchedEffect(mediaUrl, playWhenReady) {
         errorText = null
         isBuffering = true
         mediaPlayer.stop()
@@ -146,6 +146,11 @@ fun VlcPlayer(
             isBuffering = false
             onErrorState?.invoke(t.message ?: "error")
         }
+    }
+
+    // Volume 0/100 without reloading the stream.
+    LaunchedEffect(mute) {
+        mediaPlayer.volume = if (mute) 0 else 100
     }
 
     Box(

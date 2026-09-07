@@ -197,9 +197,53 @@ class FrigateRepository(
             val base = baseUrl
             config.cameras.map { (name, cam) ->
                 val ptzInfo = runCatching { requireApi().getPtzInfo(name) }.getOrNull()
-                deriveCameraCapabilities(name, cam, config, base, ptzInfo).toUi()
+                val cached = capabilityMap[name]
+                val derived = deriveCameraCapabilities(name, cam, config, base, ptzInfo)
+                val caps = if (cached != null) {
+                    derived.copy(
+                        showTalk = cached.showTalk || derived.showTalk,
+                        hasListenAudio = cached.hasListenAudio || derived.hasListenAudio,
+                        talkStreamName = cached.talkStreamName ?: derived.talkStreamName,
+                        liveStreamName = cached.liveStreamName ?: derived.liveStreamName,
+                        streamNames = cached.streamNames.ifEmpty { derived.streamNames }
+                    )
+                } else derived
+                caps.toUi()
             }.sortedBy { it.name }
         }
+    }
+
+    /** Apply persisted home order; unknown new cameras append alphabetically at the end. */
+    fun applyCameraOrder(cameras: List<CameraUiModel>, order: List<String>): List<CameraUiModel> {
+        if (order.isEmpty()) return cameras.sortedBy { it.name }
+        val byName = cameras.associateBy { it.name }
+        val ordered = LinkedHashSet<String>()
+        order.forEach { if (it in byName) ordered.add(it) }
+        cameras.map { it.name }.sorted().forEach { if (it !in ordered) ordered.add(it) }
+        return ordered.mapNotNull { byName[it] }
+    }
+
+    /** Merge fresh Frigate camera list into [current] by name — preserve order & avoid grid flash. */
+    fun mergeCamerasPreservingOrder(
+        current: List<CameraUiModel>,
+        fresh: List<CameraUiModel>
+    ): List<CameraUiModel> {
+        if (current.isEmpty()) return fresh
+        val byName = fresh.associateBy { it.name }
+        val merged = current.mapNotNull { old ->
+            val neu = byName[old.name] ?: return@mapNotNull old
+            old.copy(
+                enabled = neu.enabled,
+                supportsPtz = neu.supportsPtz,
+                supportsAudio = neu.supportsAudio,
+                streamNames = neu.streamNames.ifEmpty { old.streamNames },
+                thumbnailUrl = neu.thumbnailUrl.ifBlank { old.thumbnailUrl },
+                capabilities = neu.capabilities ?: old.capabilities
+            )
+        }
+        val known = merged.map { it.name }.toSet()
+        val appended = fresh.filter { it.name !in known }
+        return merged + appended
     }
 
     /** Full capability snapshot for one camera (uses capability map + fresh ptz/info). */
@@ -215,6 +259,7 @@ class FrigateRepository(
                 val merged = if (cached != null) {
                     derived.copy(
                         showTalk = cached.showTalk || derived.showTalk,
+                        hasListenAudio = cached.hasListenAudio || derived.hasListenAudio,
                         talkStreamName = cached.talkStreamName ?: derived.talkStreamName,
                         liveStreamName = cached.liveStreamName ?: derived.liveStreamName,
                         streamNames = cached.streamNames.ifEmpty { derived.streamNames }
@@ -615,29 +660,42 @@ class FrigateRepository(
 
     private suspend fun rebuildCapabilityMap(config: FrigateConfig, fetchGo2rtc: Boolean) {
         // Optional: merge live go2rtc stream keys from API (keys may exist beyond config snapshot).
+        var working = config
         if (fetchGo2rtc) {
             runCatching {
                 val body = requireApi().go2rtcStreams().body()?.string().orEmpty()
                 if (body.isNotBlank()) {
-                    Log.d(TAG, "go2rtc/streams fetched (${body.length} chars) for capability scan")
+                    val apiKeys = parseGo2rtcStreamKeys(body)
+                    Log.d(
+                        TAG,
+                        "go2rtc/streams fetched (${body.length} chars, ${apiKeys.size} keys) for capability scan"
+                    )
+                    if (apiKeys.isNotEmpty()) {
+                        working = mergeGo2rtcStreamKeys(config, apiKeys)
+                    }
                 }
             }.onFailure { Log.d(TAG, "go2rtc/streams optional fetch skipped: ${it.message}") }
         }
         val base = baseUrl
         val map = LinkedHashMap<String, CameraCapabilities>()
-        // Skip per-camera PTZ HTTP here (slow); ONVIF/config is enough for talk/live mapping.
+        // Skip per-camera PTZ HTTP here (slow); ONVIF/config is enough for talk/live/audio mapping.
         // Camera screen still fetches ptz/info when opened.
-        for ((name, cam) in config.cameras) {
-            val caps = deriveCameraCapabilities(name, cam, config, base, ptzInfo = null)
+        for ((name, cam) in working.cameras) {
+            val caps = deriveCameraCapabilities(name, cam, working, base, ptzInfo = null)
             map[name] = caps
+            // Lightweight rule-based summary (no cloud AI) — helps debug talk/listen detection.
             Log.i(
                 TAG,
-                "Camera capabilities [$name]: talk=${caps.showTalk} " +
+                "Camera capabilities [$name]: talk=${caps.showTalk} listen=${caps.hasListenAudio} " +
                     "talkStream=${caps.talkStreamName} liveStream=${caps.liveStreamName} " +
-                    "ptz=${caps.showPtz} streams=${caps.streamNames} vendors=${caps.vendorHints}"
+                    "ptz=${caps.showPtz} audioCfg=${caps.audioEnabled} " +
+                    "streams=${caps.streamNames} vendors=${caps.vendorHints}"
             )
+            if (!caps.showTalk && caps.hasListenAudio) {
+                Log.i(TAG, "Camera [$name]: listen audio detected without two-way talk — mute/listen OK")
+            }
             if (!caps.showTalk) {
-                val sources = caps.streamNames.flatMap { config.go2rtc?.sourceStrings(it).orEmpty() }
+                val sources = caps.streamNames.flatMap { working.go2rtc?.sourceStrings(it).orEmpty() }
                 if (sources.any { s ->
                         val l = s.lowercase()
                         l.contains("onvif://") || l.contains("reolink://") ||
@@ -649,6 +707,7 @@ class FrigateRepository(
             }
         }
         capabilityMap = map
+        cachedConfig = working
         val persisted = map.values.map {
             PersistedCameraCapability(
                 name = it.name,
@@ -662,7 +721,37 @@ class FrigateRepository(
         runCatching { appPreferences?.saveCameraCapabilities(persisted) }
             .onFailure { Log.w(TAG, "Failed to persist capability map: ${it.message}") }
         val talkCams = map.values.filter { it.showTalk }.map { "${it.name}->${it.talkStreamName}" }
-        Log.i(TAG, "Capability scan complete: ${map.size} cameras, talk-capable: $talkCams")
+        val listenCams = map.values.filter { it.hasListenAudio }.map { it.name }
+        Log.i(
+            TAG,
+            "Capability scan complete: ${map.size} cameras, talk-capable: $talkCams, listen-audio: $listenCams"
+        )
+    }
+
+    /**
+     * Parse top-level keys from GET /api/go2rtc/streams JSON object.
+     * Values are ignored — keys alone deepen live/talk stream name resolution.
+     */
+    private fun parseGo2rtcStreamKeys(body: String): Set<String> {
+        return runCatching {
+            val el = FrigateClientFactory.json.parseToJsonElement(body)
+            val obj = el.jsonObject
+            obj.keys.filter { it.isNotBlank() }.toSet()
+        }.getOrDefault(emptySet())
+    }
+
+    /** Merge API stream keys into config.go2rtc.streams (empty arrays for unknown keys). */
+    private fun mergeGo2rtcStreamKeys(config: FrigateConfig, apiKeys: Set<String>): FrigateConfig {
+        val existing = config.go2rtc?.streams.orEmpty()
+        if (apiKeys.all { it in existing }) return config
+        val merged = LinkedHashMap(existing)
+        for (key in apiKeys) {
+            if (key !in merged) {
+                merged[key] = kotlinx.serialization.json.JsonArray(emptyList())
+            }
+        }
+        val go2rtc = (config.go2rtc ?: com.falcor.viewer.data.model.Go2RtcConfig()).copy(streams = merged)
+        return config.copy(go2rtc = go2rtc)
     }
 
     /** Bearer token value without "Bearer " prefix, for WebView cookie injection. */

@@ -60,6 +60,12 @@ class AppPreferences(private val context: Context) {
         runCatching { json.decodeFromString<List<Dashboard>>(raw) }.getOrDefault(emptyList())
     }
 
+    /** User-defined home grid order (camera names). Unknown cams append at end. */
+    val cameraOrder: Flow<List<String>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[KEY_CAMERA_ORDER] ?: return@map emptyList()
+        runCatching { json.decodeFromString<List<String>>(raw) }.getOrDefault(emptyList())
+    }
+
     suspend fun setShowDetections(value: Boolean) {
         context.dataStore.edit { it[KEY_SHOW_DETECTIONS] = value }
     }
@@ -72,6 +78,16 @@ class AppPreferences(private val context: Context) {
         context.dataStore.edit {
             it[KEY_DASHBOARDS] = json.encodeToString(list)
         }
+    }
+
+    suspend fun saveCameraOrder(names: List<String>) {
+        context.dataStore.edit {
+            it[KEY_CAMERA_ORDER] = json.encodeToString(names)
+        }
+    }
+
+    suspend fun clearCameraOrder() {
+        context.dataStore.edit { it.remove(KEY_CAMERA_ORDER) }
     }
 
     val cameraCapabilities: Flow<Map<String, PersistedCameraCapability>> = context.dataStore.data.map { prefs ->
@@ -96,5 +112,6 @@ class AppPreferences(private val context: Context) {
         private val KEY_PTZ_INVERT = booleanPreferencesKey("ptz_invert_pan_tilt")
         private val KEY_DASHBOARDS = stringPreferencesKey("dashboards_json")
         private val KEY_CAMERA_CAPS = stringPreferencesKey("camera_capabilities_json")
+        private val KEY_CAMERA_ORDER = stringPreferencesKey("camera_order_json")
     }
 }

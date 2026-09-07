@@ -62,6 +62,8 @@ data class CameraUiState(
     val scrubTimestamp: Double? = null,
     val fullscreen: Boolean = false,
     val showDetections: Boolean = false,
+    /** Live listen mute — independent of WebView HTML chrome (stripped). Default unmuted. */
+    val audioMuted: Boolean = false,
     val detectionBoxes: List<DetectionBox> = emptyList(),
     val error: Boolean = false
 )
@@ -205,6 +207,14 @@ class CameraViewModel(
 
     fun setFullscreen(open: Boolean) {
         _state.update { it.copy(fullscreen = open) }
+    }
+
+    fun setAudioMuted(muted: Boolean) {
+        _state.update { it.copy(audioMuted = muted) }
+    }
+
+    fun toggleAudioMuted() {
+        _state.update { it.copy(audioMuted = !it.audioMuted) }
     }
 
     fun openPtzSheet() {

@@ -115,7 +115,7 @@ fun FalcorNavHost(
                 )
             }
             composable(Routes.HOME) {
-                val vm: HomeViewModel = viewModel(factory = HomeViewModel.factory(repository))
+                val vm: HomeViewModel = viewModel(factory = HomeViewModel.factory(repository, appPreferences))
                 HomeScreen(
                     viewModel = vm,
                     onOpenCamera = { name -> navController.navigate(Routes.camera(name)) },

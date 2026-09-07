@@ -7,7 +7,7 @@
     <string name="login_title">Connect to Frigate</string>
     <string name="login_subtitle">Enter your Frigate NVR base URL and optional credentials.</string>
     <string name="login_base_url_label">Frigate base URL</string>
-    <string name="login_base_url_hint">https://frigate.local:8971 or http://192.168.1.10:5000</string>
+    <string name="login_base_url_hint">https://frigate.example:8971 or http://frigate.example:5000</string>
     <string name="login_username_label">Username (optional)</string>
     <string name="login_password_label">Password (optional)</string>
     <string name="login_token_label">JWT / API token (optional)</string>
@@ -47,6 +47,8 @@
     <string name="home_cancel">Cancel</string>
     <string name="home_grid_cameras">%1$d cameras</string>
     <string name="home_toggle_failed">Could not toggle %1$s — check Frigate connection</string>
+    <string name="home_reorder_hint">Drag to reorder</string>
+    <string name="home_reorder_cd">Long-press and drag to rearrange cameras</string>
 
     <!-- Camera detail -->
     <string name="camera_live">Live</string>
@@ -96,6 +98,8 @@
     <string name="camera_toggle_detections">Toggle detection boxes</string>
     <string name="camera_detections_on">Detections on</string>
     <string name="camera_detections_off">Detections off</string>
+    <string name="camera_mute">Mute audio</string>
+    <string name="camera_unmute">Unmute audio</string>
 
     <!-- Authenticated media -->
     <string name="media_downloading">Downloading clip…</string>

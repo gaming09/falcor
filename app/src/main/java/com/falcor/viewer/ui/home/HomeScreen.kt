@@ -1,18 +1,20 @@
 package com.falcor.viewer.ui.home
 
-import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Logout
 import androidx.compose.material.icons.filled.Notifications
@@ -37,13 +39,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.clickable
 import com.falcor.viewer.R
 import com.falcor.viewer.data.model.CameraUiModel
 import com.falcor.viewer.player.OkHttpLivePreview
@@ -63,6 +74,8 @@ fun HomeScreen(
     val baseUrl = remember { app.repository.baseUrl.trimEnd('/') }
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
+    val gridState = rememberLazyGridState()
 
     LaunchedEffect(Unit) {
         viewModel.messages.collect { msg ->
@@ -127,24 +140,94 @@ fun HomeScreen(
                 }
             }
             else -> {
-                // LazyVerticalGrid only composes visible items — use snapshot poll
-                // (~500ms) so many cameras don't open simultaneous MJPEG streams.
+                var dragFromIndex by remember { mutableIntStateOf(-1) }
+                var dragAccumDy by remember { mutableFloatStateOf(0f) }
+                val camerasState = rememberUpdatedState(state.cameras)
+                val draggingName = state.draggingName
+
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(160.dp),
+                    state = gridState,
                     contentPadding = PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxSize().padding(padding)
                 ) {
-                    items(state.cameras, key = { it.name }) { cam ->
+                    itemsIndexed(
+                        items = state.cameras,
+                        key = { _, cam -> cam.name }
+                    ) { index, cam ->
+                        val isDragging = draggingName == cam.name
+                        val elev by animateFloatAsState(
+                            targetValue = if (isDragging) 8f else 2f,
+                            label = "cardElev"
+                        )
                         CameraCard(
                             camera = cam,
                             mjpegUrl = "$baseUrl/api/${cam.name}",
                             snapshotUrl = cam.thumbnailUrl,
                             okHttpClient = httpClient,
                             toggling = state.toggling == cam.name,
+                            anyToggling = state.toggling != null,
+                            isDragging = isDragging,
+                            elevation = elev,
                             onOpen = { onOpenCamera(cam.name) },
-                            onToggle = { viewModel.toggleCamera(cam) }
+                            onToggle = { viewModel.toggleCamera(cam) },
+                            modifier = Modifier
+                                .graphicsLayer {
+                                    scaleX = if (isDragging) 1.03f else 1f
+                                    scaleY = if (isDragging) 1.03f else 1f
+                                    alpha = if (isDragging) 0.92f else 1f
+                                }
+                                .pointerInput(cam.name, index) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = {
+                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            dragFromIndex = index
+                                            dragAccumDy = 0f
+                                            viewModel.onDragStart(cam.name)
+                                        },
+                                        onDragCancel = {
+                                            dragFromIndex = -1
+                                            dragAccumDy = 0f
+                                            viewModel.onDragEnd()
+                                        },
+                                        onDragEnd = {
+                                            dragFromIndex = -1
+                                            dragAccumDy = 0f
+                                            viewModel.onDragEnd()
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            // Prefer vertical for Adaptive grids; fall back to horizontal.
+                                            val primary = if (kotlin.math.abs(dragAmount.y) >=
+                                                kotlin.math.abs(dragAmount.x)
+                                            ) dragAmount.y else dragAmount.x
+                                            dragAccumDy += primary
+                                            // ~1 card height ≈ 140px density-independent approx in px
+                                            val threshold = 140f
+                                            val from = dragFromIndex
+                                            if (from < 0) return@detectDragGesturesAfterLongPress
+                                            val cams = camerasState.value
+                                            when {
+                                                dragAccumDy > threshold && from < cams.lastIndex -> {
+                                                    val to = from + 1
+                                                    viewModel.moveCamera(from, to)
+                                                    dragFromIndex = to
+                                                    dragAccumDy = 0f
+                                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                }
+                                                dragAccumDy < -threshold && from > 0 -> {
+                                                    val to = from - 1
+                                                    viewModel.moveCamera(from, to)
+                                                    dragFromIndex = to
+                                                    dragAccumDy = 0f
+                                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
                         )
                     }
                 }
@@ -179,20 +262,30 @@ private fun CameraCard(
     snapshotUrl: String,
     okHttpClient: okhttp3.OkHttpClient,
     toggling: Boolean,
+    anyToggling: Boolean,
+    isDragging: Boolean,
+    elevation: Float,
     onOpen: () -> Unit,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isDragging) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            }
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = elevation.dp)
     ) {
         Column {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
-                    .clickable(onClick = onOpen)
+                    .clickable(enabled = !isDragging, onClick = onOpen)
             ) {
                 if (camera.enabled) {
                     OkHttpLivePreview(
@@ -222,7 +315,7 @@ private fun CameraCard(
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(Modifier.weight(1f).clickable(onClick = onOpen)) {
+                Column(Modifier.weight(1f).clickable(enabled = !isDragging, onClick = onOpen)) {
                     Text(
                         camera.name,
                         style = MaterialTheme.typography.titleMedium,
@@ -231,19 +324,27 @@ private fun CameraCard(
                     )
                     Text(
                         stringResource(
-                            if (camera.enabled) R.string.home_live_tile else R.string.home_camera_disabled
+                            if (isDragging) R.string.home_reorder_hint
+                            else if (camera.enabled) R.string.home_live_tile
+                            else R.string.home_camera_disabled
                         ),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (toggling) {
-                    CircularProgressIndicator(Modifier.padding(8.dp), strokeWidth = 2.dp)
-                } else {
+                // Keep Switch mounted to avoid layout jump; disable while any toggle in-flight.
+                Box(contentAlignment = Alignment.Center) {
                     Switch(
                         checked = camera.enabled,
-                        onCheckedChange = { onToggle() }
+                        onCheckedChange = { onToggle() },
+                        enabled = !anyToggling && !isDragging
                     )
+                    if (toggling) {
+                        CircularProgressIndicator(
+                            Modifier.padding(4.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
                 }
             }
         }
