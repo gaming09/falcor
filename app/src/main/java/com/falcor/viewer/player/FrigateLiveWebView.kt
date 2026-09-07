@@ -58,7 +58,8 @@ class WebViewAudioController {
 
     /**
      * Apply mute/unmute + play immediately (call from button onClick / user gesture).
-     * On unmute: muted/volume, audio tracks, AudioContext.resume, page mute buttons, play().
+     * Only touches video/audio elements + AudioContext — never clicks page mute UI
+     * (those clicks can flip go2rtc/Frigate stream controls).
      */
     fun applyMute(muted: Boolean) {
         val wv = webView ?: return
@@ -182,7 +183,7 @@ fun FrigateLiveWebView(
     }
 }
 
-/** Strip HTML5 controls chrome, autoplay — mute driven by window.__falcorMuted. */
+/** Strip HTML5/Frigate chrome; pointer-events:none so Compose overlay owns taps. */
 private const val PLAYER_CHROME_JS = """
 (function(){
   function stylePlayer(){
@@ -191,8 +192,9 @@ private const val PLAYER_CHROME_JS = """
         var s = document.createElement('style');
         s.id = 'falcor-player-css';
         s.textContent = [
-          'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;}',
-          'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;position:fixed!important;inset:0!important;z-index:1!important;}',
+          'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;pointer-events:none!important;}',
+          '*{pointer-events:none!important;}',
+          'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;position:fixed!important;inset:0!important;z-index:1!important;pointer-events:none!important;}',
           'video::-webkit-media-controls{display:none!important;}',
           'video::-webkit-media-controls-enclosure{display:none!important;}',
           'video::-webkit-media-controls-panel{display:none!important;}',
@@ -201,7 +203,8 @@ private const val PLAYER_CHROME_JS = """
           'video::-webkit-media-controls-volume-slider{display:none!important;}',
           'video::-webkit-media-controls-overlay-play-button{display:none!important;}',
           'audio{display:none!important;}',
-          '.vjs-control-bar,.video-js .vjs-big-play-button,button.play,[class*=control],[class*=Controls],.plyr__controls,[class*=mute],[class*=Mute],[class*=volume],[class*=Volume],.mute-button,.volume-button{display:none!important;opacity:0!important;pointer-events:none!important;visibility:hidden!important;}'
+          'nav,aside,header,footer,[class*=sidebar],[class*=history],[class*=History],[class*=timeline],[class*=Timeline],[class*=review],[id*=sidebar]{display:none!important;visibility:hidden!important;width:0!important;height:0!important;}',
+          '.vjs-control-bar,.video-js .vjs-big-play-button,button.play,[class*=control],[class*=Controls],.plyr__controls,[class*=mute],[class*=Mute],[class*=volume],[class*=Volume],.mute-button,.volume-button,button,a,[role=button]{display:none!important;opacity:0!important;pointer-events:none!important;visibility:hidden!important;}'
         ].join('');
         (document.head || document.documentElement).appendChild(s);
       }
@@ -222,8 +225,6 @@ private const val PLAYER_CHROME_JS = """
           if (p && p.catch) p.catch(function(){});
         } catch(e) {}
       });
-      var btn = document.querySelector('button[aria-label*="play" i],button.play,button[title*="play" i],.vjs-big-play-button');
-      if (btn) try { btn.click(); } catch(e) {}
     } catch(e) {}
   }
   stylePlayer();
@@ -280,33 +281,7 @@ internal fun applyMuteJs(muted: Boolean): String = """
       });
     }
   } catch(e) {}
-  // Click common mute/unmute / volume controls in go2rtc / Frigate / video.js UIs.
-  // Only when unmuting (user gesture) — avoid toggling twice when muting.
-  if (!wantMuted) {
-    try {
-      var nodes = Array.prototype.slice.call(document.querySelectorAll(
-        'button, [role="button"], a, div, span, input[type="button"]'
-      ));
-      nodes.forEach(function(el){
-        try {
-          var aria = (el.getAttribute('aria-label') || '');
-          var title = (el.getAttribute('title') || '');
-          var cls = (el.className && el.className.toString) ? el.className.toString() : (el.className || '');
-          var id = el.id || '';
-          var hay = (aria + ' ' + title + ' ' + cls + ' ' + id).toLowerCase();
-          if (!/(mute|unmute|volume|speaker|sound|audio)/.test(hay)) return;
-          // Prefer unmute / volume-up affordances; also click muted indicators.
-          if (/(unmute|volume.?up|volumeon|speaker.?on|sound.?on)/.test(hay) ||
-              /(muted|volume.?off|speaker.?off|vjs-vol-0|is-muted)/.test(hay) ||
-              (hay.indexOf('mute') >= 0 && hay.indexOf('unmute') < 0)) {
-            el.click();
-          }
-        } catch(e) {}
-      });
-    } catch(e) {}
-    // Re-apply media after page handlers may have flipped mute.
-    document.querySelectorAll('video,audio').forEach(applyMedia);
-  }
+  // Do NOT click page mute/volume buttons — that can change go2rtc/Frigate stream UI.
 })();
 """
 
@@ -339,6 +314,10 @@ private fun keyAndroidView(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
+                // Compose overlay owns taps (Falcor mute bar); never open Frigate SPA chrome.
+                isClickable = false
+                isFocusable = false
+                isFocusableInTouchMode = false
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false

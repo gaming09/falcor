@@ -12,6 +12,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -72,6 +73,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -109,6 +111,7 @@ import com.falcor.viewer.player.VlcPlayer
 import com.falcor.viewer.ui.components.ErrorRetry
 import com.falcor.viewer.ui.player.DetectionOverlay
 import com.falcor.viewer.ui.player.ZoomableBox
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
 @Composable
@@ -500,6 +503,17 @@ private fun LiveOrClipSurface(
             .then(if (isLandscape) Modifier.height(220.dp) else Modifier.aspectRatio(16f / 9f))
     }
     val webUrls = state.activeWebViewUrls.ifEmpty { state.livePageUrls }
+    val showPlayerChrome = state.isLive &&
+        state.authenticatedClipUrl.isNullOrBlank() &&
+        !state.talking
+    var controlsVisible by remember { mutableStateOf(false) }
+    var controlsEpoch by remember { mutableIntStateOf(0) }
+    LaunchedEffect(controlsVisible, controlsEpoch) {
+        if (controlsVisible) {
+            delay(3_000)
+            controlsVisible = false
+        }
+    }
     Box(modifier = aspectMod.background(Color.Black)) {
         ZoomableBox(modifier = Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize()) {
@@ -535,7 +549,7 @@ private fun LiveOrClipSurface(
                             pageUrls = webUrls,
                             bearerToken = viewModel.jwtTokenRaw(),
                             fillAspect = false,
-                            showDetections = state.showDetections,
+                            showDetections = false,
                             allowMicrophone = false,
                             muted = state.audioMuted,
                             audioController = audioController,
@@ -581,14 +595,12 @@ private fun LiveOrClipSurface(
                         )
                     }
                 }
-                // Never draw Compose boxes over WebView live (misaligned vs detect frame).
-                // Prefer Frigate page boxes when showDetections; overlay only for native fallbacks.
+                // Compose overlay (detect w/h letterbox) — eye toggles this only, no URL swap.
                 if (
                     state.showDetections &&
                     state.isLive &&
                     state.authenticatedClipUrl == null &&
-                    !state.talking &&
-                    !state.useWebViewLive
+                    !state.talking
                 ) {
                     val dw = state.capabilities?.detectWidth
                     val dh = state.capabilities?.detectHeight
@@ -599,6 +611,65 @@ private fun LiveOrClipSurface(
                         boxes = state.detectionBoxes,
                         contentAspectRatio = ar
                     )
+                }
+                // Tap catcher above WebView — Falcor chrome, not Frigate history SPA.
+                if (showPlayerChrome) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .clickable {
+                                controlsVisible = !controlsVisible
+                                if (controlsVisible) controlsEpoch++
+                            }
+                    )
+                }
+                if (showPlayerChrome && controlsVisible) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .background(Color(0xCC000000))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Start
+                    ) {
+                        IconButton(
+                            onClick = {
+                                val nextMuted = !state.audioMuted
+                                val onWebView = state.useWebViewLive
+                                if (onWebView) {
+                                    audioController?.applyMute(nextMuted)
+                                }
+                                viewModel.setAudioMuted(nextMuted)
+                                controlsEpoch++
+                            }
+                        ) {
+                            Icon(
+                                if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                contentDescription = stringResource(
+                                    if (state.audioMuted) R.string.camera_unmute
+                                    else R.string.camera_mute
+                                ),
+                                tint = Color.White
+                            )
+                        }
+                        Text(
+                            text = stringResource(
+                                if (state.audioMuted) R.string.camera_unmute
+                                else R.string.camera_mute
+                            ),
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.clickable {
+                                val nextMuted = !state.audioMuted
+                                if (state.useWebViewLive) {
+                                    audioController?.applyMute(nextMuted)
+                                }
+                                viewModel.setAudioMuted(nextMuted)
+                                controlsEpoch++
+                            }
+                        )
+                    }
                 }
             }
         }

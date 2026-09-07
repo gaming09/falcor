@@ -590,9 +590,7 @@ class FrigateRepository(
     fun livePlayerPageUrls(
         camera: String,
         preferSub: Boolean = true,
-        streamNames: List<String> = emptyList(),
-        /** When true, prefer Frigate SPA camera routes that render detection boxes. */
-        preferDetectionUi: Boolean = false
+        streamNames: List<String> = emptyList()
     ): List<String> {
         val base = baseUrl.trimEnd('/')
         val config = cachedConfig
@@ -613,8 +611,9 @@ class FrigateRepository(
         val names = linkedSetOf(preferred, camera).filter { it.isNotBlank() }
         val enc = { s: String -> java.net.URLEncoder.encode(s, Charsets.UTF_8.name()) }
         // Request unmuted listen audio (no mic) — matches Frigate web Live player.
+        // Never embed Frigate SPA (#cameras/…) — that leaks history chrome into the WebView.
         val media = "media=video%2Baudio"
-        val webrtcFirst = buildList {
+        return buildList {
             names.forEach { n ->
                 val e = enc(n)
                 // webrtc.html before mse — better A/V; auth cookie/JWT still injected in WebView
@@ -622,20 +621,6 @@ class FrigateRepository(
                 add("$base/api/go2rtc/webrtc.html?src=$e&$media")
                 add("$base/api/go2rtc/stream.html?src=$e&$media")
                 add("$base/live/mse/mse.html?src=$e&$media")
-            }
-        }
-        val frigateUi = listOf(
-            "$base/#cameras/$camera",
-            "$base/#$camera"
-        )
-        return buildList {
-            if (preferDetectionUi) {
-                // Frigate UI draws its own boxes; keep go2rtc players as audio-capable fallbacks.
-                addAll(frigateUi)
-                addAll(webrtcFirst)
-            } else {
-                addAll(webrtcFirst)
-                addAll(frigateUi)
             }
         }.distinct()
     }

@@ -13,9 +13,9 @@ import androidx.compose.ui.unit.dp
 import com.falcor.viewer.data.model.DetectionBox
 
 /**
- * Compose detection boxes for **native** live fallbacks only.
- * WebView live disables this overlay (Frigate page boxes or none) to avoid
- * misaligned green boxes from mismatched detect vs display aspect.
+ * Compose detection boxes for live (WebView + native fallbacks).
+ * Uses camera detect width/height aspect for letterbox/pillarbox mapping so
+ * boxes stay aligned with object-fit: contain video.
  *
  * [contentAspectRatio] when > 0 maps normalized boxes into the letterboxed
  * video content rect (object-fit: contain) inside the canvas.

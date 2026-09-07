@@ -191,9 +191,9 @@ class CameraViewModel(
             flow.collect { event ->
                 if (event.camera.equals(cameraName, ignoreCase = true)) {
                     _state.update {
-                        // Skip Compose boxes while WebView live — page draws its own or none.
-                        if (it.useWebViewLive) it.copy(detectionBoxes = emptyList())
-                        else it.copy(detectionBoxes = event.boxes)
+                        // Compose overlay only (letterboxed via detect w/h) — never swap live URL.
+                        if (it.showDetections) it.copy(detectionBoxes = event.boxes)
+                        else it.copy(detectionBoxes = emptyList())
                     }
                 }
             }
@@ -205,17 +205,13 @@ class CameraViewModel(
             _state.update {
                 it.copy(
                     showDetections = show,
-                    detectionBoxes = if (show && !it.useWebViewLive) it.detectionBoxes else emptyList()
+                    // Eye toggles Compose overlay only — never change live embed URL.
+                    detectionBoxes = if (show) it.detectionBoxes else emptyList()
                 )
             }
             preferences.setShowDetections(show)
             if (show) {
                 connectWsIfNeeded(true)
-            }
-            // Rebuild live page order (Frigate UI with boxes vs go2rtc A/V players).
-            val s = _state.value
-            if (s.isLive && !s.talking && s.authenticatedClipUrl == null) {
-                applyLiveStream()
             }
         }
     }
@@ -230,6 +226,7 @@ class CameraViewModel(
         _state.update { it.copy(fullscreen = open) }
     }
 
+    /** Mute only — never touch livePageUrls / mediaUrl / quality. */
     fun setAudioMuted(muted: Boolean) {
         _state.update { it.copy(audioMuted = muted) }
     }
@@ -256,14 +253,13 @@ class CameraViewModel(
     private fun applyLiveStream() {
         val cam = _state.value.camera ?: return
         val preferSub = _state.value.quality == StreamQuality.SUB
-        val showDet = _state.value.showDetections
         val webrtcUrls = repository.webrtcLiveUrls(cameraName, preferSub, cam.streamNames)
         val urls = repository.liveStreamUrls(cameraName, preferSub, cam.streamNames)
+        // Always go2rtc/Frigate embed players — never Frigate SPA (#cameras/).
         val pages = repository.livePlayerPageUrls(
             cameraName,
             preferSub,
-            cam.streamNames,
-            preferDetectionUi = showDet
+            cam.streamNames
         )
         livePagesBeforeTalk = pages
         val firstHls = urls.indexOfFirst { it.contains("m3u8", ignoreCase = true) }.let { idx ->
@@ -289,8 +285,8 @@ class CameraViewModel(
                 activeWebViewUrls = pages,
                 scrubTimestamp = null,
                 historyProgress = 1f,
-                // Compose overlay stays off while WebView live (Frigate/page boxes or none).
-                detectionBoxes = if (it.showDetections && !useWeb) it.detectionBoxes else emptyList()
+                // Keep existing boxes when detections eye is on (Compose overlay).
+                detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
             )
         }
     }

@@ -3,12 +3,13 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.12**
+Version: **0.1.13**
 
-## Features (0.1.12)
+## Features (0.1.13)
 
-- **WebView-primary live** — Frigate/go2rtc HTML players (`webrtc.html` with `media=video+audio`, then MSE, then Frigate camera UI) in `FrigateLiveWebView`. Native WebRTC / ExoPlayer HLS / VLC demoted to fallbacks after WebView candidates exhaust; OkHttp MJPEG last. Stronger unmute on mute-button gesture (tracks, `AudioContext.resume`, page mute controls, `play()`).
-- **Detections** — Compose `DetectionOverlay` disabled while WebView live (avoids wrong green boxes from crude 1920×1080 normalization). When the eye is on, prefer Frigate UI camera routes that draw their own boxes; WS box parsing uses camera `detect.width`/`height` from `/api/config` for native fallbacks.
+- **Tap → Falcor mute bar** — tap the live picture for a short-lived Falcor chrome bar (mute/unmute); WebView embeds never use Frigate `#cameras/` SPA (no history sidebar). Mute only toggles `video`/`audio` + `AudioContext` (no DOM mute clicks that flipped the stream).
+- **WebView-primary live** — go2rtc/Frigate HTML embeds only (`live/webrtc/webrtc.html`, `api/go2rtc/webrtc.html` / `stream.html`, `mse.html` with `media=video+audio`). Native WebRTC / ExoPlayer HLS / VLC demoted after WebView exhausts; OkHttp MJPEG last. Audio path unchanged from 0.1.12.
+- **Detections** — eye toggles Compose `DetectionOverlay` only (detect w/h letterbox from `/api/config`); never swaps the live embed URL to Frigate SPA.
 - **Larger Hold to talk** — centered under History (not in the chip row); PTZ chip stays near stream controls. Detections eye uses on/off contentDescriptions.
 - **Cast via MediaRouter** — if no Cast session, opens the system route picker with a snackbar; prefers unauthenticated `http://{host}:5000/api/...` HLS/MJPEG when Frigate base is `:8971` (Chromecast cannot send JWT).
 - **Long-press + drag reorder** on the home camera grid — order persisted in DataStore; new cameras append at the end.
@@ -62,7 +63,7 @@ Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… list
 
 ### Live path
 
-1. **WebView** — go2rtc/Frigate live pages (`live/webrtc/webrtc.html?media=video+audio`, go2rtc `webrtc.html` / `stream.html`, MSE, Frigate `#cameras/{name}`). Auth cookie/JWT injected. Mute via strengthened JS (`applyMuteJs` / `WebViewAudioController`) on user gesture.
+1. **WebView** — go2rtc/Frigate embed pages only (`live/webrtc/webrtc.html?media=video+audio`, go2rtc `webrtc.html` / `stream.html`, MSE). Never Frigate `#cameras/` SPA. Auth cookie/JWT injected. Mute via `applyMuteJs` / `WebViewAudioController` on user gesture (media elements + AudioContext only).
 2. ExoPlayer authenticated HLS (`/api/go2rtc/stream.m3u8?src=`) — after WebView exhausts; mute via `player.volume`
 3. LibVLC on remaining HLS/MJPEG/RTSP candidates (volume 0/100)
 4. Optional native WebRTC (`POST /api/go2rtc/webrtc`) — demoted; kept for experiments / fallback flags
