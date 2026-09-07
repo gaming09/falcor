@@ -203,11 +203,19 @@ fun CameraScreen(
                 actions = {
                     IconButton(onClick = {
                         val nextMuted = !state.audioMuted
-                        // Soft JS volume only — never reload stream URLs.
-                        if (state.talking || state.useWebViewLive) {
-                            audioController.applyMute(nextMuted)
-                        }
+                        // Sole writer: AppBar desired state + sync evaluateJavascript applyMute.
+                        // Never reload URLs; never click HTML5/DOM mute buttons.
                         viewModel.setAudioMuted(nextMuted)
+                        if (state.talking || state.useWebViewLive) {
+                            audioController.applyMute(nextMuted) { actual ->
+                                // One read-back for honesty only when mute stuck ON matches intent.
+                                // Do NOT adopt page-muted while wanting unmuted (autoplay fight).
+                                if (nextMuted && !actual) {
+                                    // Rare: mute did not stick — leave desired muted; retry once.
+                                    audioController.applyMute(true)
+                                }
+                            }
+                        }
                     }) {
                         Icon(
                             if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
@@ -407,7 +415,11 @@ fun CameraScreen(
                                         micPermission.launch(Manifest.permission.RECORD_AUDIO)
                                     }
                                 },
-                                onRelease = { viewModel.setTalking(false) }
+                                onRelease = {
+                                    viewModel.setTalking(false)
+                                    // Restore listen mute after PTT (MicOff ≠ listen mute).
+                                    audioController.applyMute(state.audioMuted)
+                                }
                             )
                         }
                     }
@@ -477,6 +489,7 @@ private fun HoldTalkButton(
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Icon(
+            // Idle MicOff is PTT affordance only — not listen-audio mute (AppBar Volume* owns that).
             if (talking) Icons.Default.Mic else Icons.Default.MicOff,
             contentDescription = null,
             tint = fg,

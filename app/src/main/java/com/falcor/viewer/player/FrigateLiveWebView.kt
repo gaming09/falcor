@@ -16,8 +16,10 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.JavascriptInterface
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,14 +47,18 @@ import java.util.concurrent.atomic.AtomicInteger
 
 
 /**
- * Holds a stable [WebView] reference so mute/unmute can run
- * [WebView.evaluateJavascript] synchronously on the mute-button click path
- * (user gesture → unmuted autoplay).
+ * Holds a stable [WebView] reference so AppBar mute can run
+ * [WebView.evaluateJavascript] synchronously on the click path
+ * (user gesture → unmuted autoplay). Sole owner of listen mute — no HTML5 controls.
  */
 class WebViewAudioController {
     @Volatile
     var webView: WebView? = null
         private set
+
+    /** One-shot: WebView asks Compose to show "Tap for sound" (not a second mute control). */
+    @Volatile
+    var onNeedsTapForSound: (() -> Unit)? = null
 
     fun attach(view: WebView) {
         webView = view
@@ -63,28 +69,100 @@ class WebViewAudioController {
     }
 
     /**
-     * Apply mute/unmute + play immediately (call from button onClick / user gesture).
-     * Only touches video/audio elements + AudioContext — never clicks page mute UI
-     * (those clicks can flip go2rtc/Frigate stream controls).
+     * Apply mute/unmute + play immediately (call from AppBar onClick / user gesture).
+     * Sets video/audio.muted, volume, audioTracks + play + AudioContext.resume.
+     * Never clicks page mute UI. Optional [onReadBack] is a single probe after apply
+     * for icon honesty — callers must NOT treat page muted as Compose source of truth
+     * when wanting unmuted (go2rtc autoplay-muted must not flip AppBar to muted).
      */
-    fun applyMute(muted: Boolean) {
+    fun applyMute(muted: Boolean, onReadBack: ((Boolean) -> Unit)? = null) {
         val wv = webView ?: return
         val js = applyMuteJs(muted)
-        // Click path is on the UI thread — evaluate now so unmuted play shares the gesture.
+        val after: ((String?) -> Unit)? = if (onReadBack != null) {
+            {
+                wv.evaluateJavascript(READ_MUTED_JS) { raw ->
+                    onReadBack(parseJsBoolean(raw, fallback = muted))
+                }
+            }
+        } else null
         try {
-            wv.evaluateJavascript(js, null)
+            wv.evaluateJavascript(js, after)
         } catch (_: Throwable) {
-            wv.post { runCatching { wv.evaluateJavascript(js, null) } }
+            wv.post {
+                runCatching { wv.evaluateJavascript(js, after) }
+            }
         }
     }
 }
 
+private fun parseJsBoolean(raw: String?, fallback: Boolean): Boolean {
+    if (raw == null) return fallback
+    val t = raw.trim().trim('"')
+    return when (t) {
+        "true", "1" -> true
+        "false", "0" -> false
+        else -> fallback
+    }
+}
+
+private const val READ_MUTED_JS = """
+(function(){
+  function collect(root){
+    var list = [];
+    try { root.querySelectorAll('video,audio').forEach(function(v){ list.push(v); }); } catch(e) {}
+    try {
+      root.querySelectorAll('iframe').forEach(function(f){
+        try {
+          var doc = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+          if (doc) collect(doc).forEach(function(v){ list.push(v); });
+        } catch(e) {}
+      });
+    } catch(e) {}
+    return list;
+  }
+  var media = collect(document);
+  if (!media.length) return String(!!window.__falcorMuted);
+  return String(!!media[0].muted);
+})();
+"""
+
+private const val SILENT_PLAYING_JS = """
+(function(){
+  if (!!window.__falcorMuted) return 'ok';
+  function collect(root){
+    var list = [];
+    try { root.querySelectorAll('video,audio').forEach(function(v){ list.push(v); }); } catch(e) {}
+    try {
+      root.querySelectorAll('iframe').forEach(function(f){
+        try {
+          var doc = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+          if (doc) collect(doc).forEach(function(v){ list.push(v); });
+        } catch(e) {}
+      });
+    } catch(e) {}
+    return list;
+  }
+  var playing = false, silent = false;
+  collect(document).forEach(function(v){
+    try {
+      if (!v.paused && v.readyState >= 2) playing = true;
+      if (v.muted || v.volume === 0) silent = true;
+      if (v.srcObject && v.srcObject.getAudioTracks) {
+        var tracks = v.srcObject.getAudioTracks();
+        if (tracks && tracks.length && tracks.every(function(t){ return !t.enabled; })) silent = true;
+      }
+    } catch(e) {}
+  });
+  return (playing && silent) ? 'silent' : 'ok';
+})();
+"""
+
 /**
  * Authenticated WebView hosting Frigate/go2rtc MSE or WebRTC live / talk player pages.
  *
- * - Autoplay + unmuted HTML5 video (live audio)
+ * - Autoplay + unmuted HTML5 video (live audio); native media controls suppressed
  * - Grants CAMERA / AUDIO_CAPTURE for getUserMedia (two-way talk)
- * - Compose mute drives JS via [WebViewAudioController] (user-gesture safe)
+ * - AppBar mute is the single owner via [WebViewAudioController.applyMute]
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -96,7 +174,7 @@ fun FrigateLiveWebView(
     showDetections: Boolean = true,
     /** When true, WebView may request mic/camera for go2rtc talk. */
     allowMicrophone: Boolean = false,
-    /** Compose-driven mute — injects JS on <video>/<audio>; HTML5 controls stay visible. */
+    /** AppBar-driven mute — injects JS on <video>/<audio>; HTML5 controls hidden. */
     muted: Boolean = false,
     audioController: WebViewAudioController? = null,
     onPlaying: (() -> Unit)? = null,
@@ -115,17 +193,20 @@ fun FrigateLiveWebView(
     val attempt = remember { AtomicInteger(0) }
     val pageUrl = pageUrls.getOrNull(candidateIndex)
     val context = LocalContext.current
+    var showTapForSound by remember(pageUrls) { mutableStateOf(false) }
 
     LaunchedEffect(pageUrls) {
         candidateIndex = 0
         exhausted = false
         loading = true
+        showTapForSound = false
         attempt.set(0)
     }
 
     // Keep controller mute in sync when StateFlow changes (e.g. fullscreen / talk).
     LaunchedEffect(muted) {
         controllerState?.applyMute(muted)
+        if (muted) showTapForSound = false
     }
 
     // Request STREAM_MUSIC audio focus so live WebView audio is audible.
@@ -192,6 +273,23 @@ fun FrigateLiveWebView(
                     // After media starts: unmute+play once so streams are not stuck muted.
                     if (!mutedState) {
                         controllerState?.applyMute(false)
+                        val wv = controllerState?.webView
+                        if (wv != null) {
+                            val handler = Handler(Looper.getMainLooper())
+                            // After delayed retries, if still silent-but-playing → one-shot tap hint.
+                            handler.postDelayed({
+                                if (mutedState) return@postDelayed
+                                runCatching {
+                                    wv.evaluateJavascript(SILENT_PLAYING_JS) { raw ->
+                                        val t = raw?.trim()?.trim('"')
+                                        if (t == "silent" && !mutedState) {
+                                            showTapForSound = true
+                                            controllerState?.onNeedsTapForSound?.invoke()
+                                        }
+                                    }
+                                }
+                            }, 2800L)
+                        }
                     }
                 },
                 onMainFrameError = {
@@ -218,12 +316,85 @@ fun FrigateLiveWebView(
                 style = MaterialTheme.typography.bodyMedium
             )
         }
+        // One-shot "Tap for sound" when silent-but-playing after retries — not a second mute.
+        if (showTapForSound && !mutedState && !exhausted) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(androidx.compose.ui.graphics.Color(0x66000000))
+                    .clickable {
+                        controllerState?.applyMute(false)
+                        showTapForSound = false
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "Tap for sound",
+                    color = androidx.compose.ui.graphics.Color.White,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+        }
     }
 }
 
-/** Hide go2rtc/Frigate page chrome only — keep native HTML5 video controls visible + tappable. */
+/** Hide go2rtc/Frigate page chrome + suppress native HTML5 media controls (AppBar owns mute). */
 private const val PLAYER_CHROME_JS = """
 (function(){
+  function collectMedia(root){
+    var list = [];
+    try {
+      root.querySelectorAll('video,audio').forEach(function(v){ list.push(v); });
+    } catch(e) {}
+    try {
+      root.querySelectorAll('iframe').forEach(function(f){
+        try {
+          var doc = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+          if (doc) collectMedia(doc).forEach(function(v){ list.push(v); });
+        } catch(e) {}
+      });
+    } catch(e) {}
+    return list;
+  }
+  function applyOne(v){
+    try {
+      var muted = !!window.__falcorMuted;
+      v.controls = false;
+      v.removeAttribute('controls');
+      v.setAttribute('playsinline','');
+      v.setAttribute('webkit-playsinline','');
+      v.muted = muted;
+      v.defaultMuted = muted;
+      try { v.volume = muted ? 0.0 : 1.0; } catch(e) {}
+      if (v.srcObject && v.srcObject.getAudioTracks) {
+        v.srcObject.getAudioTracks().forEach(function(t){ try { t.enabled = !muted; } catch(e) {} });
+      }
+      if (typeof v.getAudioTracks === 'function') {
+        try { v.getAudioTracks().forEach(function(t){ t.enabled = !muted; }); } catch(e) {}
+      }
+      if (!v.__falcorMuteHooked) {
+        v.__falcorMuteHooked = true;
+        ['loadedmetadata','playing','play','canplay'].forEach(function(ev){
+          v.addEventListener(ev, function(){ applyOne(v); });
+        });
+        try {
+          if (v.srcObject && v.srcObject.addEventListener) {
+            v.srcObject.addEventListener('addtrack', function(){ applyOne(v); });
+          }
+        } catch(e) {}
+        v.addEventListener('volumechange', function(){
+          try {
+            // AppBar owns mute via __falcorMuted — re-apply if page flips; do not push into Compose.
+            if (!!v.muted !== !!window.__falcorMuted) {
+              applyOne(v);
+            }
+          } catch(e) {}
+        });
+      }
+      var p = v.play();
+      if (p && p.catch) p.catch(function(){});
+    } catch(e) {}
+  }
   function stylePlayer(){
     try {
       if (!document.getElementById('falcor-player-css')) {
@@ -232,36 +403,36 @@ private const val PLAYER_CHROME_JS = """
         s.textContent = [
           'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;}',
           'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;position:fixed!important;inset:0!important;z-index:1!important;pointer-events:auto!important;}',
-          'video::-webkit-media-controls,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-panel{display:flex!important;opacity:1!important;visibility:visible!important;pointer-events:auto!important;}',
-          'video::-webkit-media-controls-mute-button,video::-webkit-media-controls-volume-slider,video::-webkit-media-controls-timeline,video::-webkit-media-controls-current-time-display,video::-webkit-media-controls-time-remaining-display,video::-webkit-media-controls-play-button{pointer-events:auto!important;opacity:1!important;visibility:visible!important;}',
-          'audio{display:none!important;}',
+          'video::-webkit-media-controls,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-panel,video::-webkit-media-controls-mute-button,video::-webkit-media-controls-volume-slider,video::-webkit-media-controls-timeline,video::-webkit-media-controls-current-time-display,video::-webkit-media-controls-time-remaining-display,video::-webkit-media-controls-play-button,video::-webkit-media-controls-overlay-play-button{display:none!important;opacity:0!important;visibility:hidden!important;pointer-events:none!important;width:0!important;height:0!important;}',
           'nav,aside,header,footer,[class*=sidebar],[class*=history],[class*=History],[class*=timeline],[class*=Timeline],[class*=review],[id*=sidebar]{display:none!important;visibility:hidden!important;width:0!important;height:0!important;}'
         ].join('');
         (document.head || document.documentElement).appendChild(s);
       }
-      var muted = !!window.__falcorMuted;
-      document.querySelectorAll('video,audio').forEach(function(v){
-        try {
-          // Keep native HTML5 control bar (mute works there); re-assert so pages cannot strip it.
-          v.controls = true;
-          v.setAttribute('controls','');
-          v.setAttribute('playsinline','');
-          v.setAttribute('webkit-playsinline','');
-          v.muted = muted;
-          v.defaultMuted = muted;
-          v.volume = muted ? 0.0 : 1.0;
-          if (v.srcObject && v.srcObject.getAudioTracks) {
-            v.srcObject.getAudioTracks().forEach(function(t){ t.enabled = !muted; });
-          }
-          var p = v.play();
-          if (p && p.catch) p.catch(function(){});
-        } catch(e) {}
-      });
+      collectMedia(document).forEach(applyOne);
     } catch(e) {}
   }
   stylePlayer();
   if (!window.__falcorPlayerTimer) {
     window.__falcorPlayerTimer = setInterval(stylePlayer, 800);
+  }
+  if (!window.__falcorFirstTap) {
+    window.__falcorFirstTap = true;
+    var once = function(){
+      try {
+        if (!window.__falcorMuted) {
+          window.__falcorMuted = false;
+          collectMedia(document).forEach(applyOne);
+          try {
+            var Ctx = window.AudioContext || window.webkitAudioContext;
+            if (Ctx && window.__falcorAudioCtx && window.__falcorAudioCtx.state === 'suspended') {
+              window.__falcorAudioCtx.resume();
+            }
+          } catch(e) {}
+        }
+      } catch(e) {}
+    };
+    document.addEventListener('touchend', once, {passive:true, once:true});
+    document.addEventListener('click', once, {passive:true, once:true});
   }
   document.addEventListener('DOMContentLoaded', stylePlayer);
 })();
@@ -274,11 +445,25 @@ internal fun applyMuteJs(muted: Boolean): String = """
 (function(){
   var wantMuted = ${if (muted) "true" else "false"};
   window.__falcorMuted = wantMuted;
+  function collectMedia(root){
+    var list = [];
+    try {
+      root.querySelectorAll('video,audio').forEach(function(v){ list.push(v); });
+    } catch(e) {}
+    try {
+      root.querySelectorAll('iframe').forEach(function(f){
+        try {
+          var doc = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+          if (doc) collectMedia(doc).forEach(function(v){ list.push(v); });
+        } catch(e) {}
+      });
+    } catch(e) {}
+    return list;
+  }
   function applyMedia(v){
     try {
-      // Never strip HTML5 controls — native mute bar is the reliable unmute path.
-      v.controls = true;
-      v.setAttribute('controls','');
+      v.controls = false;
+      v.removeAttribute('controls');
       v.setAttribute('playsinline','');
       v.setAttribute('webkit-playsinline','');
       v.muted = wantMuted;
@@ -290,11 +475,22 @@ internal fun applyMuteJs(muted: Boolean): String = """
       if (typeof v.getAudioTracks === 'function') {
         try { v.getAudioTracks().forEach(function(t){ t.enabled = !wantMuted; }); } catch(e) {}
       }
+      if (!v.__falcorMuteHooked) {
+        v.__falcorMuteHooked = true;
+        ['loadedmetadata','playing','play','canplay'].forEach(function(ev){
+          v.addEventListener(ev, function(){ applyMedia(v); });
+        });
+        try {
+          if (v.srcObject && v.srcObject.addEventListener) {
+            v.srcObject.addEventListener('addtrack', function(){ applyMedia(v); });
+          }
+        } catch(e) {}
+      }
       var p = v.play();
       if (p && p.catch) p.catch(function(){});
     } catch(e) {}
   }
-  document.querySelectorAll('video,audio').forEach(applyMedia);
+  collectMedia(document).forEach(applyMedia);
   // Resume any AudioContext created by the page (MSE/WebRTC players).
   try {
     var Ctx = window.AudioContext || window.webkitAudioContext;
@@ -314,7 +510,6 @@ internal fun applyMuteJs(muted: Boolean): String = """
       });
     }
   } catch(e) {}
-  // Do NOT click page mute/volume buttons — that can change go2rtc/Frigate stream UI.
 })();
 """
 
@@ -347,7 +542,7 @@ private fun keyAndroidView(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
-                // Allow touches to reach native HTML5 media controls (Compose overlay leaves bottom gap).
+                // Touches reach the video surface (first-tap unmute gesture); HTML5 controls are hidden.
                 isClickable = true
                 isFocusable = true
                 isFocusableInTouchMode = true
@@ -364,6 +559,16 @@ private fun keyAndroidView(
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
                 controller?.attach(this)
+
+                // Optional bridge: page may request one-shot "Tap for sound" (not mute SoT).
+                addJavascriptInterface(object {
+                    @JavascriptInterface
+                    fun needsTapForSound() {
+                        Handler(Looper.getMainLooper()).post {
+                            controller?.onNeedsTapForSound?.invoke()
+                        }
+                    }
+                }, "FalcorAudio")
 
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")
                     ?.removePrefix("bearer ")?.trim().orEmpty()
@@ -414,16 +619,17 @@ private fun keyAndroidView(
                             "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;pointer-events:auto!important;z-index:1!important;}';document.head.appendChild(s);$hideBoxes})();",
                             null
                         )
-                        // Default unmuted: tracks enabled, volume 1, muted=false, AudioContext.resume.
+                        // AppBar mute state → video/audio; controls suppressed; late media retries.
                         view?.evaluateJavascript(muteFlagJs(mutedFlag) + PLAYER_CHROME_JS, null)
                         view?.evaluateJavascript(applyMuteJs(mutedFlag), null)
-                        // Retry unmute+play a few times after load — MSE/WebRTC often attaches late.
-                        if (!mutedFlag && view != null) {
+                        // Retry apply after load — MSE/WebRTC / iframe media often attaches late.
+                        if (view != null) {
                             val handler = Handler(Looper.getMainLooper())
-                            listOf(400L, 1200L, 2500L).forEach { delayMs ->
+                            val want = mutedFlag
+                            listOf(400L, 1200L, 2500L, 5000L).forEach { delayMs ->
                                 handler.postDelayed({
                                     runCatching {
-                                        view.evaluateJavascript(applyMuteJs(false), null)
+                                        view.evaluateJavascript(applyMuteJs(want), null)
                                     }
                                 }, delayMs)
                             }

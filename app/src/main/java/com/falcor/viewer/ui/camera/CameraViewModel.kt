@@ -69,7 +69,7 @@ data class CameraUiState(
     val scrubTimestamp: Double? = null,
     val fullscreen: Boolean = false,
     val showDetections: Boolean = false,
-    /** Soft mute flag for AppBar / WebView JS volume (HTML5 bar preferred). Default unmuted. */
+    /** AppBar listen-mute flag (WebView applyMute). Default unmuted. Not the PTT MicOff icon. */
     val audioMuted: Boolean = false,
     val detectionBoxes: List<DetectionBox> = emptyList(),
     val error: Boolean = false
