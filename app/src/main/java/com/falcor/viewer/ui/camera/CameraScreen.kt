@@ -518,6 +518,7 @@ private fun LiveOrClipSurface(
                             FrigateLiveWebView(
                                 pageUrls = webUrls,
                                 bearerToken = viewModel.jwtTokenRaw(),
+                                cameraName = state.cameraName,
                                 fillAspect = false,
                                 showDetections = false,
                                 allowMicrophone = true,
@@ -545,6 +546,7 @@ private fun LiveOrClipSurface(
                         FrigateLiveWebView(
                             pageUrls = webUrls,
                             bearerToken = viewModel.jwtTokenRaw(),
+                            cameraName = state.cameraName,
                             fillAspect = false,
                             showDetections = false,
                             allowMicrophone = false,

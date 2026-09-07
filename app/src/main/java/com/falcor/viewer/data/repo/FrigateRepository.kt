@@ -16,6 +16,9 @@ import com.falcor.viewer.data.model.deriveCameraCapabilities
 import com.falcor.viewer.data.model.isUsableLiveVideoSrc
 import com.falcor.viewer.data.model.resolvePreferredLiveStreamName
 import com.falcor.viewer.data.model.roleLooksListenCapable
+import com.falcor.viewer.data.model.preferMseFirstLivePlayer
+import com.falcor.viewer.data.model.orderedLiveEmbedPageUrls
+import com.falcor.viewer.data.model.streamHasOpusOrWebRtcFriendlyAudio
 import com.falcor.viewer.data.model.streamNameLooksListenCapable
 import com.falcor.viewer.data.model.resolveStreamNames
 import com.falcor.viewer.data.model.toUi
@@ -630,6 +633,9 @@ class FrigateRepository(
     /**
      * Candidate Frigate/go2rtc live player pages (MSE/WebRTC) for smooth WebView live.
      * Prefer these over LibVLC; OkHttp MJPEG remains fallback.
+     *
+     * Order: opus / A/V+listen remux → WebRTC first (Reolink). Plain RTSP + listen →
+     * MSE first (Frigate web path for AAC), WebRTC as fallback. Never hardcode camera names.
      */
     fun livePlayerPageUrls(
         camera: String,
@@ -665,10 +671,14 @@ class FrigateRepository(
             }
             if (preferSub) pick(true) ?: pick(false) else pick(false) ?: pick(true)
         }
+        val hasListen = hasListenCapableLiveSrc(camera)
+        val webrtcFriendly = streamHasOpusOrWebRtcFriendlyAudio(preferred, go2rtc)
+        val mseFirstPreferred = preferMseFirstLivePlayer(preferred, go2rtc, hasListen)
         Log.d(
             TAG,
             "livePlayerPageUrls camera=$camera preferSub=$preferSub src=$preferred " +
-                "qualitySrc=$qualityOnly listenCapable=${hasListenCapableLiveSrc(camera)}"
+                "qualitySrc=$qualityOnly webrtcFriendly=$webrtcFriendly " +
+                "mseFirst=$mseFirstPreferred listenCapable=$hasListen"
         )
         val names = linkedSetOf<String>().apply {
             add(preferred)
@@ -682,11 +692,8 @@ class FrigateRepository(
         return buildList {
             names.forEach { n ->
                 val e = enc(n)
-                // webrtc.html before mse — better A/V; auth cookie/JWT still injected in WebView
-                add("$base/live/webrtc/webrtc.html?src=$e&$media")
-                add("$base/api/go2rtc/webrtc.html?src=$e&$media")
-                add("$base/api/go2rtc/stream.html?src=$e&$media")
-                add("$base/live/mse/mse.html?src=$e&$media")
+                val mseFirst = preferMseFirstLivePlayer(n, go2rtc, hasListen)
+                addAll(orderedLiveEmbedPageUrls(base, e, media, mseFirst))
             }
         }.distinct()
     }
