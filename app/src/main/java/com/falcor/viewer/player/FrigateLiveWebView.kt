@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,12 +56,16 @@ import java.util.concurrent.atomic.AtomicInteger
  * - 0.1.22-debug: keep probe; live src prefers A/V+listen, skips audio-only *_webrtc
  * - 0.1.23-debug: MSE-first when no opus/A/V+listen; on webrtc aTracks==0 + video playing
  *   advance candidate (do not wait for main-frame error). No applyMute revival.
+ * - 0.1.24-debug: key(cameraName) fresh WebView; reject Frigate SPA (#cameras);
+ *   require (webrtc|mse|stream).html?src=; probe includes truncated location.href.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun FrigateLiveWebView(
     pageUrls: List<String>,
     bearerToken: String?,
+    /** Forces a fresh WebView instance per camera so prior SPA/pages cannot stick. */
+    cameraName: String = "",
     modifier: Modifier = Modifier,
     fillAspect: Boolean = true,
     showDetections: Boolean = true,
@@ -148,32 +153,35 @@ fun FrigateLiveWebView(
         contentAlignment = Alignment.Center
     ) {
         if (pageUrl != null && !exhausted) {
-            keyAndroidView(
-                pageUrl = pageUrl,
-                bearerToken = bearerToken,
-                showDetections = showDetState,
-                allowMicrophone = allowMicState,
-                qualityLabel = qualityState,
-                hasListenAudio = hasListenState,
-                candidateIndex = candidateIndex,
-                onAudioProbe = onProbeState,
-                onPlaying = {
-                    loading = false
-                    onPlayingState?.invoke()
-                },
-                onMainFrameError = {
-                    val next = candidateIndex + 1
-                    if (next < urlsState.size) {
-                        candidateIndex = next
-                        loading = true
-                    } else {
-                        exhausted = true
+            // Fresh WebView when camera or candidate URL changes — never reuse SPA DOM.
+            key(cameraName, pageUrl) {
+                keyAndroidView(
+                    pageUrl = pageUrl,
+                    bearerToken = bearerToken,
+                    showDetections = showDetState,
+                    allowMicrophone = allowMicState,
+                    qualityLabel = qualityState,
+                    hasListenAudio = hasListenState,
+                    candidateIndex = candidateIndex,
+                    onAudioProbe = onProbeState,
+                    onPlaying = {
                         loading = false
-                        onAllFailedState?.invoke()
-                    }
-                },
-                onStarted = { loading = true }
-            )
+                        onPlayingState?.invoke()
+                    },
+                    onMainFrameError = {
+                        val next = candidateIndex + 1
+                        if (next < urlsState.size) {
+                            candidateIndex = next
+                            loading = true
+                        } else {
+                            exhausted = true
+                            loading = false
+                            onAllFailedState?.invoke()
+                        }
+                    },
+                    onStarted = { loading = true }
+                )
+            }
         }
         if (loading && !exhausted) {
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
@@ -186,6 +194,40 @@ fun FrigateLiveWebView(
             )
         }
     }
+}
+
+
+/**
+ * True for Frigate SPA camera routes that must never stay loaded in the live WebView.
+ * Blocks `#cameras…` and `/cameras/…` (and `/cameras` end/query).
+ */
+internal fun isBlockedFrigateSpaUrl(url: String?): Boolean {
+    if (url.isNullOrBlank()) return false
+    val lower = url.lowercase()
+    if (lower.contains("#cameras")) return true
+    // /cameras/, /cameras?, /cameras#, or ends with /cameras
+    if (Regex("""/cameras(/|\?|#|$)""").containsMatchIn(lower)) return true
+    return false
+}
+
+/**
+ * Accept only go2rtc/Frigate live embed pages that carry an explicit `src=`.
+ * Matches webrtc.html / mse.html / stream.html with a src= query, plus
+ * live/webrtc pages that carry src= (talk index).
+ */
+internal fun isLiveEmbedUrl(url: String?): Boolean {
+    if (url.isNullOrBlank()) return false
+    if (isBlockedFrigateSpaUrl(url)) return false
+    val lower = url.lowercase()
+    val hasSrc = Regex("""[?&]src=[^&]+""", RegexOption.IGNORE_CASE).containsMatchIn(url)
+    if (!hasSrc) return false
+    if (lower.contains("webrtc.html") || lower.contains("mse.html") || lower.contains("stream.html")) {
+        return true
+    }
+    // Talk candidate: /live/webrtc/index.html?src=…
+    if (lower.contains("/live/webrtc/") && lower.contains("src=")) return true
+    if (lower.contains("/api/go2rtc/") && lower.contains("src=")) return true
+    return false
 }
 
 /**
@@ -227,7 +269,8 @@ private const val PLAYER_CHROME_JS = """
         s.textContent = [
           'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;}',
           'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;position:fixed!important;inset:0!important;z-index:1!important;pointer-events:auto!important;}',
-          'nav,aside,header,footer,[class*=sidebar],[class*=history],[class*=History],[class*=timeline],[class*=Timeline],[class*=review],[id*=sidebar]{display:none!important;visibility:hidden!important;width:0!important;height:0!important;}'
+          'nav,aside,header,footer,[class*=sidebar],[class*=history],[class*=History],[class*=timeline],[class*=Timeline],[class*=review],[id*=sidebar],[class*=MuiAppBar],[class*=appBar],[class*=toolbar],[class*=Toolbar],[class*=fab],[class*=Fab],[data-testid*=menu]{display:none!important;visibility:hidden!important;width:0!important;height:0!important;pointer-events:none!important;}',
+          '[class*=control-bar],[class*=ControlBar],[class*=player-bar],[class*=PlayerBar],.fixed.inset-x-0{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}'
         ].join('');
         (document.head || document.documentElement).appendChild(s);
       }
@@ -270,6 +313,7 @@ private fun audioProbeJs(qualityLabel: String, candidateIndex: Int, hasListen: I
   }
   function pathKind(url){
     var u = (url || '').toLowerCase();
+    if (u.indexOf('#cameras') >= 0 || /\/cameras(\/|\?|#|$)/.test(u)) return 'spa';
     if (u.indexOf('webrtc') >= 0) return 'webrtc';
     if (u.indexOf('mse') >= 0) return 'mse';
     if (u.indexOf('stream.html') >= 0 || u.indexOf('/stream') >= 0) return 'stream';
@@ -352,7 +396,9 @@ private fun audioProbeJs(qualityLabel: String, candidateIndex: Int, hasListen: I
       var vMute = v0 ? (v0.muted ? 1 : 0) : -1;
       var vol = v0 ? v0.volume : -1;
       if (!src && v0 && v0.currentSrc) src = srcParam(v0.currentSrc) || v0.currentSrc;
+      var hrefShort = url.length > 72 ? (url.substring(0, 72) + '\u2026') : url;
       var snack = 'q=' + QUALITY + ' | src=' + (src || '?') + ' | ' + kind +
+        ' | href=' + hrefShort +
         ' | vMute=' + vMute + ' vol=' + vol +
         ' | aTracks=' + aTrackN + ' vTracks=' + vTrackN +
         ' | audioEls=' + audios.length +
@@ -587,12 +633,76 @@ private fun keyAndroidView(
                         }
                     }
                 }
+                // Intended embed URL for this WebView instance (SPA recovery).
+                val intendedUrl = pageUrl
+                val spaReloadTried = booleanArrayOf(false)
                 webViewClient = object : WebViewClient() {
+                    private fun recoverNonEmbed(view: WebView?, arrived: String?, reason: String): Boolean {
+                        // Ignore blank/null — WebView can report these mid-navigation.
+                        if (arrived.isNullOrBlank() || arrived == "about:blank") return false
+                        if (isLiveEmbedUrl(arrived)) return false
+                        android.util.Log.w(
+                            "FrigateLiveWebView",
+                            "Non-embed ($reason): $arrived — intended=$intendedUrl"
+                        )
+                        if (!spaReloadTried[0] && intendedUrl.isNotBlank() && isLiveEmbedUrl(intendedUrl)) {
+                            spaReloadTried[0] = true
+                            val tokenHdr = bearerToken?.trim()?.removePrefix("Bearer ")
+                                ?.removePrefix("bearer ")?.trim().orEmpty()
+                            val headers = mutableMapOf<String, String>()
+                            if (tokenHdr.isNotEmpty()) headers["Authorization"] = "Bearer $tokenHdr"
+                            view?.loadUrl(intendedUrl, headers)
+                            return true
+                        }
+                        onErrorState()
+                        return true
+                    }
+
+                    private fun shouldBlockNav(url: String?): Boolean {
+                        if (url.isNullOrBlank() || url == "about:blank") return false
+                        if (isBlockedFrigateSpaUrl(url)) return true
+                        return !isLiveEmbedUrl(url)
+                    }
+
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        val u = request?.url?.toString()
+                        if (shouldBlockNav(u)) {
+                            android.util.Log.w(
+                                "FrigateLiveWebView",
+                                "Blocked non-embed navigation: $u"
+                            )
+                            recoverNonEmbed(view, u, "shouldOverride")
+                            return true
+                        }
+                        return false
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                        if (shouldBlockNav(url)) {
+                            android.util.Log.w(
+                                "FrigateLiveWebView",
+                                "Blocked non-embed navigation (legacy): $url"
+                            )
+                            recoverNonEmbed(view, url, "shouldOverrideLegacy")
+                            return true
+                        }
+                        return false
+                    }
+
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                         onStarted()
+                        if (shouldBlockNav(url)) {
+                            recoverNonEmbed(view, url, "onPageStarted")
+                        }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
+                        // Never treat Frigate SPA / missing src= as a successful live surface.
+                        if (recoverNonEmbed(view, url, "onPageFinished")) return
                         onPlayingState()
                         val hideBoxes = if (!showDet) {
                             "var s2=document.createElement('style');s2.innerHTML='canvas,.bounding-box,[class*=detect]{display:none!important;}';document.head.appendChild(s2);"
@@ -651,7 +761,11 @@ private fun keyAndroidView(
                 it.candidateIndex = candState
                 it.hasListen = if (hasListenState == true) 1 else 0
             }
-            if (webView.url != pageUrl) {
+            val current = webView.url
+            val needReload = current != pageUrl ||
+                isBlockedFrigateSpaUrl(current) ||
+                (current != null && current != "about:blank" && !isLiveEmbedUrl(current))
+            if (needReload) {
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")
                     ?.removePrefix("bearer ")?.trim().orEmpty()
                 if (token.isNotEmpty()) injectAuthCookie(pageUrl, "frigate_token", token)
@@ -667,7 +781,9 @@ private fun keyAndroidView(
         },
         onRelease = { webView ->
             webView.stopLoading()
+            runCatching { webView.loadUrl("about:blank") }
             runCatching { webView.removeJavascriptInterface("FalcorAudioProbe") }
+            runCatching { webView.destroy() }
         }
     )
 }

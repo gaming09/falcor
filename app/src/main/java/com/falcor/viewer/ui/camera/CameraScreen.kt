@@ -518,6 +518,7 @@ private fun LiveOrClipSurface(
                             FrigateLiveWebView(
                                 pageUrls = webUrls,
                                 bearerToken = viewModel.jwtTokenRaw(),
+                                cameraName = state.cameraName,
                                 fillAspect = false,
                                 showDetections = false,
                                 allowMicrophone = true,
@@ -543,8 +544,9 @@ private fun LiveOrClipSurface(
                     // Primary live: single go2rtc/Frigate WebView embed (webrtc.html / mse).
                     state.useWebViewLive && state.isLive && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
-                            pageUrls = webUrls,
-                            bearerToken = viewModel.jwtTokenRaw(),
+                                pageUrls = webUrls,
+                                bearerToken = viewModel.jwtTokenRaw(),
+                                cameraName = state.cameraName,
                             fillAspect = false,
                             showDetections = false,
                             allowMicrophone = false,

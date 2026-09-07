@@ -3,10 +3,11 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.23**
+Version: **0.1.24**
 
-## Features (0.1.23)
+## Features (0.1.24)
 
+- **Open-camera SPA guard (0.1.24)** — `key(cameraName)` recreates the live WebView per camera so a prior page cannot stick. WebViewClient blocks Frigate SPA (`#cameras` / `/cameras/`) and any main-frame URL that is not `(webrtc|mse|stream).html?src=…`; recovers by reloading the intended embed once, then advances candidate / OkHttp. Probe snackbar includes truncated `location.href`. Freeze MSE/audio/prefer-listen ordering from 0.1.23.
 - **MSE-first for plain RTSP listen (0.1.23)** — when the chosen live `src` lacks opus / A/V+listen remux markers, player pages prefer **mse.html** before webrtc (AAC over plain `rtsp://` often silent on WebRTC). Opus / `#video=`+`#audio=` remux still webrtc-first (Reolink). If WebRTC plays video with `aTracks==0`, advance to the next candidate (MSE) without waiting for a main-frame error. Listen detection treats plain RTSP + (`camera.audio.enabled` / ffmpeg AAC hints / aac in sources) as listen-capable for caps/snackbar. Keeps probe; no applyMute revival; never hardcodes camera names.
 - **Prefer A/V+listen live src (0.1.22)** — live WebView `?src=` prefers go2rtc/main keys with **both** video and audio (`#video=` / plain `rtsp://` **and** `#audio=`/opus/aac). Skips audio-only helpers (`ffmpeg:…#audio=opus` without video — typical `*_webrtc` / "WebRTC Audio"). Main/Sub chips bind to `state.quality` (default MAIN); probe `q=` matches. Video-only cams keep video src + no-listen snackbar.
 - **Diagnostic probe for listen audio (0.1.20)** — after live WebView playing (+ ~2s), Snackbar + `Log.i("FalcorAudioProbe")` report src/quality/pathKind/muted/volume/tracks (probe-only; no product mute changes). Kept to verify A/V src + `vTracks=1`.
