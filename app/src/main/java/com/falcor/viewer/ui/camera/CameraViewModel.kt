@@ -36,13 +36,13 @@ data class CameraUiState(
     val candidateIndex: Int = 0,
     /** LibVLC exhausted — OkHttp MJPEG/snapshot (last resort). */
     val useOkHttpPreview: Boolean = false,
-    /** Prefer native go2rtc WebRTC (AudioTrack mute). */
+    /** Native go2rtc WebRTC — demoted fallback after WebView (AudioTrack mute). */
     val preferNativeWebRtc: Boolean = false,
     /** WHEP POST URLs for native WebRTC live. */
     val webrtcPostUrls: List<String> = emptyList(),
-    /** Prefer ExoPlayer authenticated HLS (volume mute) after WebRTC. */
+    /** ExoPlayer authenticated HLS — demoted fallback after WebView. */
     val preferNativeLive: Boolean = false,
-    /** Prefer Frigate WebView live pages — talk or late fallback. */
+    /** Primary live path: Frigate/go2rtc HTML players in WebView. */
     val useWebViewLive: Boolean = false,
     val livePageUrls: List<String> = emptyList(),
     /** URLs currently loaded in the main live WebView (live or talk). */
@@ -190,7 +190,11 @@ class CameraViewModel(
             val flow = repository.detectionsFlow() ?: return@launch
             flow.collect { event ->
                 if (event.camera.equals(cameraName, ignoreCase = true)) {
-                    _state.update { it.copy(detectionBoxes = event.boxes) }
+                    _state.update {
+                        // Skip Compose boxes while WebView live — page draws its own or none.
+                        if (it.useWebViewLive) it.copy(detectionBoxes = emptyList())
+                        else it.copy(detectionBoxes = event.boxes)
+                    }
                 }
             }
         }
@@ -198,11 +202,20 @@ class CameraViewModel(
 
     fun setShowDetections(show: Boolean) {
         viewModelScope.launch {
+            _state.update {
+                it.copy(
+                    showDetections = show,
+                    detectionBoxes = if (show && !it.useWebViewLive) it.detectionBoxes else emptyList()
+                )
+            }
             preferences.setShowDetections(show)
             if (show) {
                 connectWsIfNeeded(true)
-            } else {
-                _state.update { it.copy(detectionBoxes = emptyList()) }
+            }
+            // Rebuild live page order (Frigate UI with boxes vs go2rtc A/V players).
+            val s = _state.value
+            if (s.isLive && !s.talking && s.authenticatedClipUrl == null) {
+                applyLiveStream()
             }
         }
     }
@@ -243,15 +256,20 @@ class CameraViewModel(
     private fun applyLiveStream() {
         val cam = _state.value.camera ?: return
         val preferSub = _state.value.quality == StreamQuality.SUB
+        val showDet = _state.value.showDetections
         val webrtcUrls = repository.webrtcLiveUrls(cameraName, preferSub, cam.streamNames)
         val urls = repository.liveStreamUrls(cameraName, preferSub, cam.streamNames)
-        val pages = repository.livePlayerPageUrls(cameraName, preferSub, cam.streamNames)
+        val pages = repository.livePlayerPageUrls(
+            cameraName,
+            preferSub,
+            cam.streamNames,
+            preferDetectionUi = showDet
+        )
         livePagesBeforeTalk = pages
-        val hasWebRtc = webrtcUrls.isNotEmpty()
-        val hasHls = urls.any { it.contains("m3u8", ignoreCase = true) }
         val firstHls = urls.indexOfFirst { it.contains("m3u8", ignoreCase = true) }.let { idx ->
             if (idx >= 0) idx else 0
         }
+        val useWeb = pages.isNotEmpty()
         _state.update {
             it.copy(
                 isLive = true,
@@ -259,18 +277,20 @@ class CameraViewModel(
                 authenticatedClipUrl = null,
                 candidateUrls = urls,
                 candidateIndex = firstHls.coerceAtMost((urls.size - 1).coerceAtLeast(0)),
-                mediaUrl = if (hasWebRtc) null else (urls.getOrNull(firstHls) ?: urls.firstOrNull()),
+                // Keep HLS/VLC candidates ready for WebView-exhausted fallback.
+                mediaUrl = if (useWeb) null else (urls.getOrNull(firstHls) ?: urls.firstOrNull()),
                 useOkHttpPreview = false,
-                preferNativeWebRtc = hasWebRtc,
+                // WebView-primary live; native WebRTC/HLS demoted until WebView fails.
+                preferNativeWebRtc = false,
                 webrtcPostUrls = webrtcUrls,
-                // HLS is optional fallback after native WebRTC — not first choice.
-                preferNativeLive = !hasWebRtc && hasHls,
-                useWebViewLive = !hasWebRtc && !hasHls && pages.isNotEmpty(),
+                preferNativeLive = false,
+                useWebViewLive = useWeb,
                 livePageUrls = pages,
                 activeWebViewUrls = pages,
                 scrubTimestamp = null,
                 historyProgress = 1f,
-                detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
+                // Compose overlay stays off while WebView live (Frigate/page boxes or none).
+                detectionBoxes = if (it.showDetections && !useWeb) it.detectionBoxes else emptyList()
             )
         }
     }
@@ -283,7 +303,38 @@ class CameraViewModel(
             onTalkWebRtcFailed()
             return
         }
-        // WebView was late fallback — OkHttp MJPEG/snapshot last resort.
+        // WebView exhausted — optional HLS → VLC → OkHttp MJPEG.
+        val hasHls = s.candidateUrls.any { it.contains("m3u8", ignoreCase = true) }
+        if (hasHls) {
+            val firstHls = s.candidateUrls.indexOfFirst { it.contains("m3u8", ignoreCase = true) }
+                .coerceAtLeast(0)
+            _state.update {
+                it.copy(
+                    useWebViewLive = false,
+                    preferNativeWebRtc = false,
+                    preferNativeLive = true,
+                    useOkHttpPreview = false,
+                    candidateIndex = firstHls,
+                    mediaUrl = s.candidateUrls.getOrNull(firstHls) ?: s.candidateUrls.firstOrNull(),
+                    detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
+                )
+            }
+            return
+        }
+        if (s.candidateUrls.isNotEmpty()) {
+            _state.update {
+                it.copy(
+                    useWebViewLive = false,
+                    preferNativeWebRtc = false,
+                    preferNativeLive = false,
+                    useOkHttpPreview = false,
+                    candidateIndex = 0,
+                    mediaUrl = s.candidateUrls.firstOrNull(),
+                    detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
+                )
+            }
+            return
+        }
         _state.update {
             it.copy(
                 useWebViewLive = false,
@@ -363,19 +414,10 @@ class CameraViewModel(
             return
         }
 
-        // VLC / non-native path
+        // VLC / non-native path (WebView already primary — do not loop back to it)
         val next = s.candidateIndex + 1
         if (next < s.candidateUrls.size) {
             _state.update { it.copy(candidateIndex = next, mediaUrl = s.candidateUrls[next]) }
-        } else if (s.isLive && s.livePageUrls.isNotEmpty()) {
-            _state.update {
-                it.copy(
-                    preferNativeLive = false,
-                    useWebViewLive = true,
-                    activeWebViewUrls = it.livePageUrls,
-                    mediaUrl = null
-                )
-            }
         } else if (s.isLive) {
             _state.update { it.copy(useOkHttpPreview = true, mediaUrl = null) }
         }
@@ -612,7 +654,7 @@ class CameraViewModel(
         val s = _state.value
         if (!s.talking) return
         val restore = livePagesBeforeTalk.ifEmpty { s.livePageUrls }
-        val resumeNativeLive = s.isLive && s.authenticatedClipUrl == null
+        val resumeLive = s.isLive && s.authenticatedClipUrl == null
         _state.update {
             it.copy(
                 talking = false,
@@ -620,11 +662,11 @@ class CameraViewModel(
                 talkWebRtcIndex = 0,
                 activeWebViewUrls = restore,
                 livePageUrls = restore,
-                useWebViewLive = false
+                useWebViewLive = restore.isNotEmpty()
             )
         }
-        // Leave talk WebView; restore native WebRTC-first live listen with AudioTrack mute.
-        if (resumeNativeLive) {
+        // Leave talk WebView; restore WebView-primary live listen.
+        if (resumeLive) {
             applyLiveStream()
         }
     }

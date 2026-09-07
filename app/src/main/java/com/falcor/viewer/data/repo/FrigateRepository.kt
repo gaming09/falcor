@@ -266,6 +266,7 @@ class FrigateRepository(
                     )
                 } else derived
                 capabilityMap = capabilityMap + (camera to merged)
+                syncDetectFramesToWs(capabilityMap)
                 merged
             }
         }
@@ -362,12 +363,24 @@ class FrigateRepository(
             existing?.disconnect()
             val client = FrigateWsClient(creds)
             wsClient = client
+            syncDetectFramesToWs(capabilityMap)
             client.connect()
             return
         }
+        syncDetectFramesToWs(capabilityMap)
         if (existing.state.value == FrigateWsClient.ConnectionState.DISCONNECTED) {
             existing.connect()
         }
+    }
+
+    /** Push Frigate detect.width/height into the WS client for box normalization. */
+    private fun syncDetectFramesToWs(map: Map<String, CameraCapabilities>) {
+        val frames = map.mapNotNull { (name, caps) ->
+            val w = caps.detectWidth
+            val h = caps.detectHeight
+            if (w != null && h != null && w > 0 && h > 0) name to (w to h) else null
+        }.toMap()
+        wsClient?.setDetectFrames(frames)
     }
 
     fun disconnectPtzWs(force: Boolean = false) {
@@ -574,7 +587,13 @@ class FrigateRepository(
      * Candidate Frigate/go2rtc live player pages (MSE/WebRTC) for smooth WebView live.
      * Prefer these over LibVLC; OkHttp MJPEG remains fallback.
      */
-    fun livePlayerPageUrls(camera: String, preferSub: Boolean = true, streamNames: List<String> = emptyList()): List<String> {
+    fun livePlayerPageUrls(
+        camera: String,
+        preferSub: Boolean = true,
+        streamNames: List<String> = emptyList(),
+        /** When true, prefer Frigate SPA camera routes that render detection boxes. */
+        preferDetectionUi: Boolean = false
+    ): List<String> {
         val base = baseUrl.trimEnd('/')
         val config = cachedConfig
         val go2rtc = config?.go2rtc
@@ -595,16 +614,29 @@ class FrigateRepository(
         val enc = { s: String -> java.net.URLEncoder.encode(s, Charsets.UTF_8.name()) }
         // Request unmuted listen audio (no mic) — matches Frigate web Live player.
         val media = "media=video%2Baudio"
-        return buildList {
+        val webrtcFirst = buildList {
             names.forEach { n ->
                 val e = enc(n)
+                // webrtc.html before mse — better A/V; auth cookie/JWT still injected in WebView
                 add("$base/live/webrtc/webrtc.html?src=$e&$media")
                 add("$base/api/go2rtc/webrtc.html?src=$e&$media")
                 add("$base/api/go2rtc/stream.html?src=$e&$media")
                 add("$base/live/mse/mse.html?src=$e&$media")
             }
-            // Frigate camera hash route (SPA) — last resort embed
-            add("$base/#$camera")
+        }
+        val frigateUi = listOf(
+            "$base/#cameras/$camera",
+            "$base/#$camera"
+        )
+        return buildList {
+            if (preferDetectionUi) {
+                // Frigate UI draws its own boxes; keep go2rtc players as audio-capable fallbacks.
+                addAll(frigateUi)
+                addAll(webrtcFirst)
+            } else {
+                addAll(webrtcFirst)
+                addAll(frigateUi)
+            }
         }.distinct()
     }
 
@@ -790,6 +822,7 @@ class FrigateRepository(
         }
         capabilityMap = map
         cachedConfig = working
+        syncDetectFramesToWs(map)
         val persisted = map.values.map {
             PersistedCameraCapability(
                 name = it.name,

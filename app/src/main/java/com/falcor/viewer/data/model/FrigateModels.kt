@@ -103,7 +103,7 @@ data class CameraConfig(
     val ffmpeg: JsonElement? = null,
     val live: LiveConfig? = null,
     val record: FeatureToggle? = null,
-    val detect: FeatureToggle? = null,
+    val detect: DetectConfig? = null,
     val audio: FeatureToggle? = null,
     val onvif: OnvifConfig? = null,
     val ui: JsonElement? = null
@@ -124,6 +124,14 @@ data class LiveConfig(
 @Serializable
 data class FeatureToggle(
     val enabled: Boolean? = null
+)
+
+/** Frigate camera.detect — includes frame size used for WS box normalization. */
+@Serializable
+data class DetectConfig(
+    val enabled: Boolean? = null,
+    val width: Int? = null,
+    val height: Int? = null
 )
 
 @Serializable
@@ -252,7 +260,11 @@ data class CameraCapabilities(
     val liveRoleMap: Map<String, String>,
     /** Vendor / path hints for logging/UI only. */
     val vendorHints: List<String>,
-    val thumbnailUrl: String
+    val thumbnailUrl: String,
+    /** Frigate detect.width — pixel space for WS detection boxes. */
+    val detectWidth: Int? = null,
+    /** Frigate detect.height — pixel space for WS detection boxes. */
+    val detectHeight: Int? = null
 )
 
 /** UI-facing camera card model. */
@@ -468,6 +480,8 @@ fun deriveCameraCapabilities(
     val listen = detectListenAudio(name, camera, go2rtc, streams, talkCapable = talk)
     val vendors = detectVendorHints(camera, go2rtc, streams)
     val liveName = resolvePreferredLiveStreamName(name, camera, streams, go2rtc?.streamKeys.orEmpty())
+    val detectW = camera.detect?.width?.takeIf { it > 0 }
+    val detectH = camera.detect?.height?.takeIf { it > 0 }
     return CameraCapabilities(
         name = name,
         enabled = camera.isEnabled,
@@ -485,7 +499,9 @@ fun deriveCameraCapabilities(
         streamNames = streams,
         liveRoleMap = camera.live?.streams.orEmpty(),
         vendorHints = vendors,
-        thumbnailUrl = "$baseUrl/api/$name/latest.jpg"
+        thumbnailUrl = "$baseUrl/api/$name/latest.jpg",
+        detectWidth = detectW,
+        detectHeight = detectH
     )
 }
 

@@ -50,6 +50,17 @@ class FrigateWsClient(
     private val reconnectAttempts = AtomicBoolean(false)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
+    /**
+     * Per-camera Frigate detect.width/height for normalizing pixel boxes.
+     * Updated from /api/config via [setDetectFrames].
+     */
+    @Volatile
+    private var detectFrames: Map<String, Pair<Int, Int>> = emptyMap()
+
+    fun setDetectFrames(frames: Map<String, Pair<Int, Int>>) {
+        detectFrames = frames
+    }
+
     data class CameraDetections(val camera: String, val boxes: List<DetectionBox>)
 
     val wsUrl: String
@@ -141,7 +152,7 @@ class FrigateWsClient(
             val camera = eventObj["camera"]?.jsonPrimitive?.contentOrNull
                 ?: topic.substringBefore('/').takeIf { it.isNotBlank() && it != "frigate" }
                 ?: return null
-            val box = parseBox(eventObj["box"]) ?: return null
+            val box = parseBox(eventObj["box"], camera) ?: return null
             val label = eventObj["label"]?.jsonPrimitive?.contentOrNull ?: "object"
             val score = eventObj["score"]?.jsonPrimitive?.floatOrNull
                 ?: eventObj["top_score"]?.jsonPrimitive?.floatOrNull
@@ -169,7 +180,7 @@ class FrigateWsClient(
                 ?: return null
             val boxes = detectionsArr.mapNotNull { el ->
                 val o = el.asObjectOrNull() ?: return@mapNotNull null
-                val b = parseBox(o["box"] ?: o["bbox"]) ?: return@mapNotNull null
+                val b = parseBox(o["box"] ?: o["bbox"], camera) ?: return@mapNotNull null
                 val label = o["label"]?.jsonPrimitive?.contentOrNull ?: "object"
                 val score = o["score"]?.jsonPrimitive?.floatOrNull
                 b.copy(label = label, score = score)
@@ -189,7 +200,7 @@ class FrigateWsClient(
                 if (objs != null) {
                     val boxes = objs.values.mapNotNull { v ->
                         val o = v.asObjectOrNull() ?: return@mapNotNull null
-                        val b = parseBox(o["box"] ?: o["bbox"]) ?: return@mapNotNull null
+                        val b = parseBox(o["box"] ?: o["bbox"], cam) ?: return@mapNotNull null
                         val label = o["label"]?.jsonPrimitive?.contentOrNull ?: "object"
                         val score = o["score"]?.jsonPrimitive?.floatOrNull
                         b.copy(label = label, score = score)
@@ -205,7 +216,7 @@ class FrigateWsClient(
         return null
     }
 
-    private fun parseBox(el: JsonElement?): DetectionBox? {
+    private fun parseBox(el: JsonElement?, camera: String? = null): DetectionBox? {
         if (el == null) return null
         val arr: JsonArray = when (el) {
             is JsonArray -> el
@@ -219,21 +230,22 @@ class FrigateWsClient(
         val b = arr[1].jsonPrimitive.floatOrNull ?: return null
         val c = arr[2].jsonPrimitive.floatOrNull ?: return null
         val d = arr[3].jsonPrimitive.floatOrNull ?: return null
-        // Frigate boxes are often [xmin, ymin, xmax, ymax] in pixel or normalized.
-        // If values look like pixels (>1.5), normalize assuming 1920x1080 — caller scales.
-        // Prefer treating as already normalized when all <= 1.5.
-        return if (a <= 1.5f && b <= 1.5f && c <= 1.5f && d <= 1.5f) {
-            DetectionBox(label = "object", left = a, top = b, right = c, bottom = d)
-        } else {
-            // pixel coords → crude normalize (updated when we know frame size; 1920x1080 default)
-            DetectionBox(
-                label = "object",
-                left = a / 1920f,
-                top = b / 1080f,
-                right = c / 1920f,
-                bottom = d / 1080f
-            )
+        // Frigate boxes are [xmin, ymin, xmax, ymax] in detect-frame pixels or normalized 0..1.
+        if (a <= 1.5f && b <= 1.5f && c <= 1.5f && d <= 1.5f) {
+            return DetectionBox(label = "object", left = a, top = b, right = c, bottom = d)
         }
+        val frame = camera?.let { key ->
+            detectFrames[key] ?: detectFrames.entries.firstOrNull { it.key.equals(key, true) }?.value
+        }
+        val dw = (frame?.first ?: 0).takeIf { it > 0 }?.toFloat() ?: 1920f
+        val dh = (frame?.second ?: 0).takeIf { it > 0 }?.toFloat() ?: 1080f
+        return DetectionBox(
+            label = "object",
+            left = a / dw,
+            top = b / dh,
+            right = c / dw,
+            bottom = d / dh
+        )
     }
 
     private fun JsonElement.asObjectOrNull(): JsonObject? =

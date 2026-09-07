@@ -12,11 +12,20 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.unit.dp
 import com.falcor.viewer.data.model.DetectionBox
 
+/**
+ * Compose detection boxes for **native** live fallbacks only.
+ * WebView live disables this overlay (Frigate page boxes or none) to avoid
+ * misaligned green boxes from mismatched detect vs display aspect.
+ *
+ * [contentAspectRatio] when > 0 maps normalized boxes into the letterboxed
+ * video content rect (object-fit: contain) inside the canvas.
+ */
 @Composable
 fun DetectionOverlay(
     boxes: List<DetectionBox>,
     modifier: Modifier = Modifier,
-    boxColor: Color = Color(0xFF00E676)
+    boxColor: Color = Color(0xFF00E676),
+    contentAspectRatio: Float = 0f
 ) {
     if (boxes.isEmpty()) return
     Canvas(modifier = modifier.fillMaxSize()) {
@@ -26,11 +35,38 @@ fun DetectionOverlay(
             textSize = 32f
             isAntiAlias = true
         }
+        val ox: Float
+        val oy: Float
+        val cw: Float
+        val ch: Float
+        if (contentAspectRatio > 0.01f) {
+            val viewAr = size.width / size.height.coerceAtLeast(1f)
+            if (viewAr > contentAspectRatio) {
+                // pillarbox
+                val w = size.height * contentAspectRatio
+                ox = (size.width - w) / 2f
+                oy = 0f
+                cw = w
+                ch = size.height
+            } else {
+                // letterbox
+                val h = size.width / contentAspectRatio
+                ox = 0f
+                oy = (size.height - h) / 2f
+                cw = size.width
+                ch = h
+            }
+        } else {
+            ox = 0f
+            oy = 0f
+            cw = size.width
+            ch = size.height
+        }
         boxes.forEach { box ->
-            val l = box.left.coerceIn(0f, 1f) * size.width
-            val t = box.top.coerceIn(0f, 1f) * size.height
-            val r = box.right.coerceIn(0f, 1f) * size.width
-            val b = box.bottom.coerceIn(0f, 1f) * size.height
+            val l = ox + box.left.coerceIn(0f, 1f) * cw
+            val t = oy + box.top.coerceIn(0f, 1f) * ch
+            val r = ox + box.right.coerceIn(0f, 1f) * cw
+            val b = oy + box.bottom.coerceIn(0f, 1f) * ch
             drawRect(
                 color = boxColor,
                 topLeft = Offset(l, t),
@@ -41,7 +77,12 @@ fun DetectionOverlay(
                 append(box.label)
                 box.score?.let { append(" ${(it * 100).toInt()}%") }
             }
-            drawContext.canvas.nativeCanvas.drawText(label, l + 4f, (t - 6f).coerceAtLeast(28f), paint)
+            drawContext.canvas.nativeCanvas.drawText(
+                label,
+                l + 4f,
+                (t - 6f).coerceAtLeast(oy + 28f),
+                paint
+            )
         }
     }
 }

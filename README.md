@@ -3,11 +3,12 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.11**
+Version: **0.1.12**
 
-## Features (0.1.11)
+## Features (0.1.12)
 
-- **Native WebRTC live** — recvonly PeerConnection to go2rtc via Frigate `POST /api/go2rtc/webrtc?src=` (WHEP-style SDP offer/answer). Mute uses `AudioTrack.setEnabled` / `setVolume` (no WebView autoplay). WebView kept for hold-to-talk (mic/backchannel) and as late live fallback. Optional ExoPlayer HLS, then VLC/OkHttp.
+- **WebView-primary live** — Frigate/go2rtc HTML players (`webrtc.html` with `media=video+audio`, then MSE, then Frigate camera UI) in `FrigateLiveWebView`. Native WebRTC / ExoPlayer HLS / VLC demoted to fallbacks after WebView candidates exhaust; OkHttp MJPEG last. Stronger unmute on mute-button gesture (tracks, `AudioContext.resume`, page mute controls, `play()`).
+- **Detections** — Compose `DetectionOverlay` disabled while WebView live (avoids wrong green boxes from crude 1920×1080 normalization). When the eye is on, prefer Frigate UI camera routes that draw their own boxes; WS box parsing uses camera `detect.width`/`height` from `/api/config` for native fallbacks.
 - **Larger Hold to talk** — centered under History (not in the chip row); PTZ chip stays near stream controls. Detections eye uses on/off contentDescriptions.
 - **Cast via MediaRouter** — if no Cast session, opens the system route picker with a snackbar; prefers unauthenticated `http://{host}:5000/api/...` HLS/MJPEG when Frigate base is `:8971` (Chromecast cannot send JWT).
 - **Long-press + drag reorder** on the home camera grid — order persisted in DataStore; new cameras append at the end.
@@ -61,13 +62,15 @@ Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… list
 
 ### Live path
 
-1. **Native WebRTC** — `POST /api/go2rtc/webrtc?src=` (Frigate→go2rtc) with SDP offer; optional direct go2rtc `:apiPort/api/webrtc` when published. Mute via `AudioTrack`
-2. ExoPlayer authenticated HLS (`/api/go2rtc/stream.m3u8?src=`) — mute via `player.volume`
+1. **WebView** — go2rtc/Frigate live pages (`live/webrtc/webrtc.html?media=video+audio`, go2rtc `webrtc.html` / `stream.html`, MSE, Frigate `#cameras/{name}`). Auth cookie/JWT injected. Mute via strengthened JS (`applyMuteJs` / `WebViewAudioController`) on user gesture.
+2. ExoPlayer authenticated HLS (`/api/go2rtc/stream.m3u8?src=`) — after WebView exhausts; mute via `player.volume`
 3. LibVLC on remaining HLS/MJPEG/RTSP candidates (volume 0/100)
-4. WebView go2rtc/Frigate live pages (late fallback; also used for talk/PTT)
+4. Optional native WebRTC (`POST /api/go2rtc/webrtc`) — demoted; kept for experiments / fallback flags
 5. OkHttp MJPEG / snapshot poll (last resort)
 
-**WebRTC caveats:** Frigate must proxy go2rtc WebRTC (`/api/go2rtc/webrtc`). Media path needs go2rtc WebRTC listen (typically UDP/TCP **8555**) and LAN candidates in go2rtc config for non-localhost viewers. Self-signed TLS uses the existing authenticated OkHttp client for signaling only — ICE/media is peer-to-peer to go2rtc.
+**Talk/PTT** still uses WebView with `media=video+audio+microphone`. History clips still use ExoPlayer/LibVLC as before.
+
+**WebRTC caveats (native fallback):** Frigate must proxy go2rtc WebRTC (`/api/go2rtc/webrtc`). Media path needs go2rtc WebRTC listen (typically UDP/TCP **8555**) and LAN candidates in go2rtc config for non-localhost viewers.
 
 ### Two-way talk
 
@@ -77,7 +80,7 @@ Press and hold **Hold to talk** (large button centered under History). Falcor:
 2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks).
 3. Grants WebView `AUDIO_CAPTURE` via `WebChromeClient.onPermissionRequest`.
 4. Injects CSS/JS to strip `controls` and autoplay.
-5. On release, restores native WebRTC live listen (AudioTrack mute).
+5. On release, restores WebView-primary live listen (Compose mute → JS).
 
 **Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio. If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera.
 

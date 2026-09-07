@@ -529,27 +529,7 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // Native go2rtc WebRTC first — mute via AudioTrack.setEnabled/setVolume.
-                    state.isLive && state.preferNativeWebRtc && state.webrtcPostUrls.isNotEmpty() -> {
-                        Go2rtcWebRtcPlayer(
-                            webrtcPostUrls = state.webrtcPostUrls,
-                            okHttpClient = viewModel.httpClient(),
-                            mute = state.audioMuted,
-                            onAllFailed = { viewModel.onNativeWebRtcFailed() },
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    // Optional ExoPlayer HLS — mute via player.volume.
-                    state.isLive && state.preferNativeLive && !state.mediaUrl.isNullOrBlank() -> {
-                        AuthenticatedLivePlayer(
-                            streamUrl = state.mediaUrl,
-                            okHttpClient = viewModel.httpClient(),
-                            mute = state.audioMuted,
-                            onError = { viewModel.onStreamError() },
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    // WebView live as late fallback (after WebRTC / HLS / VLC).
+                    // Primary live: Frigate/go2rtc HTML players (WebView) — video+audio.
                     state.useWebViewLive && state.isLive && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
                             pageUrls = webUrls,
@@ -560,6 +540,26 @@ private fun LiveOrClipSurface(
                             muted = state.audioMuted,
                             audioController = audioController,
                             onAllFailed = { viewModel.onWebViewLiveFailed() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    // Demoted: native go2rtc WebRTC after WebView exhausts.
+                    state.isLive && state.preferNativeWebRtc && state.webrtcPostUrls.isNotEmpty() -> {
+                        Go2rtcWebRtcPlayer(
+                            webrtcPostUrls = state.webrtcPostUrls,
+                            okHttpClient = viewModel.httpClient(),
+                            mute = state.audioMuted,
+                            onAllFailed = { viewModel.onNativeWebRtcFailed() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    // Demoted: ExoPlayer HLS after WebView.
+                    state.isLive && state.preferNativeLive && !state.mediaUrl.isNullOrBlank() -> {
+                        AuthenticatedLivePlayer(
+                            streamUrl = state.mediaUrl,
+                            okHttpClient = viewModel.httpClient(),
+                            mute = state.audioMuted,
+                            onError = { viewModel.onStreamError() },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -581,8 +581,24 @@ private fun LiveOrClipSurface(
                         )
                     }
                 }
-                if (state.showDetections && state.isLive && state.authenticatedClipUrl == null && !state.talking) {
-                    DetectionOverlay(boxes = state.detectionBoxes)
+                // Never draw Compose boxes over WebView live (misaligned vs detect frame).
+                // Prefer Frigate page boxes when showDetections; overlay only for native fallbacks.
+                if (
+                    state.showDetections &&
+                    state.isLive &&
+                    state.authenticatedClipUrl == null &&
+                    !state.talking &&
+                    !state.useWebViewLive
+                ) {
+                    val dw = state.capabilities?.detectWidth
+                    val dh = state.capabilities?.detectHeight
+                    val ar = if (dw != null && dh != null && dw > 0 && dh > 0) {
+                        dw.toFloat() / dh.toFloat()
+                    } else 0f
+                    DetectionOverlay(
+                        boxes = state.detectionBoxes,
+                        contentAspectRatio = ar
+                    )
                 }
             }
         }

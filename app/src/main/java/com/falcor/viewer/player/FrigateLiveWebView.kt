@@ -56,7 +56,10 @@ class WebViewAudioController {
         if (webView === view) webView = null
     }
 
-    /** Apply mute/unmute + play immediately (call from button onClick / user gesture). */
+    /**
+     * Apply mute/unmute + play immediately (call from button onClick / user gesture).
+     * On unmute: muted/volume, audio tracks, AudioContext.resume, page mute buttons, play().
+     */
     fun applyMute(muted: Boolean) {
         val wv = webView ?: return
         val js = applyMuteJs(muted)
@@ -236,21 +239,74 @@ private fun muteFlagJs(muted: Boolean): String =
 
 internal fun applyMuteJs(muted: Boolean): String = """
 (function(){
-  window.__falcorMuted = ${if (muted) "true" else "false"};
-  document.querySelectorAll('video,audio').forEach(function(v){
+  var wantMuted = ${if (muted) "true" else "false"};
+  window.__falcorMuted = wantMuted;
+  function applyMedia(v){
     try {
       v.removeAttribute('controls');
       v.controls = false;
-      v.muted = ${if (muted) "true" else "false"};
-      v.defaultMuted = ${if (muted) "true" else "false"};
-      v.volume = ${if (muted) "0.0" else "1.0"};
+      v.setAttribute('playsinline','');
+      v.setAttribute('webkit-playsinline','');
+      v.muted = wantMuted;
+      v.defaultMuted = wantMuted;
+      try { v.volume = wantMuted ? 0.0 : 1.0; } catch(e) {}
       if (v.srcObject && v.srcObject.getAudioTracks) {
-        v.srcObject.getAudioTracks().forEach(function(t){ t.enabled = ${if (muted) "false" else "true"}; });
+        v.srcObject.getAudioTracks().forEach(function(t){ try { t.enabled = !wantMuted; } catch(e) {} });
+      }
+      if (typeof v.getAudioTracks === 'function') {
+        try { v.getAudioTracks().forEach(function(t){ t.enabled = !wantMuted; }); } catch(e) {}
       }
       var p = v.play();
       if (p && p.catch) p.catch(function(){});
     } catch(e) {}
-  });
+  }
+  document.querySelectorAll('video,audio').forEach(applyMedia);
+  // Resume any AudioContext created by the page (MSE/WebRTC players).
+  try {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) {
+      if (!window.__falcorAudioCtx) {
+        try { window.__falcorAudioCtx = new Ctx(); } catch(e) {}
+      }
+      var ctxs = [];
+      if (window.__falcorAudioCtx) ctxs.push(window.__falcorAudioCtx);
+      try {
+        if (typeof window.__audioContexts !== 'undefined' && window.__audioContexts && window.__audioContexts.forEach) {
+          window.__audioContexts.forEach(function(c){ ctxs.push(c); });
+        }
+      } catch(e) {}
+      ctxs.forEach(function(c){
+        try { if (c && c.state === 'suspended') c.resume(); } catch(e) {}
+      });
+    }
+  } catch(e) {}
+  // Click common mute/unmute / volume controls in go2rtc / Frigate / video.js UIs.
+  // Only when unmuting (user gesture) — avoid toggling twice when muting.
+  if (!wantMuted) {
+    try {
+      var nodes = Array.prototype.slice.call(document.querySelectorAll(
+        'button, [role="button"], a, div, span, input[type="button"]'
+      ));
+      nodes.forEach(function(el){
+        try {
+          var aria = (el.getAttribute('aria-label') || '');
+          var title = (el.getAttribute('title') || '');
+          var cls = (el.className && el.className.toString) ? el.className.toString() : (el.className || '');
+          var id = el.id || '';
+          var hay = (aria + ' ' + title + ' ' + cls + ' ' + id).toLowerCase();
+          if (!/(mute|unmute|volume|speaker|sound|audio)/.test(hay)) return;
+          // Prefer unmute / volume-up affordances; also click muted indicators.
+          if (/(unmute|volume.?up|volumeon|speaker.?on|sound.?on)/.test(hay) ||
+              /(muted|volume.?off|speaker.?off|vjs-vol-0|is-muted)/.test(hay) ||
+              (hay.indexOf('mute') >= 0 && hay.indexOf('unmute') < 0)) {
+            el.click();
+          }
+        } catch(e) {}
+      });
+    } catch(e) {}
+    // Re-apply media after page handlers may have flipped mute.
+    document.querySelectorAll('video,audio').forEach(applyMedia);
+  }
 })();
 """
 
