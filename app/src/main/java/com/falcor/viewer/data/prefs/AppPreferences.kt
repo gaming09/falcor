@@ -15,6 +15,17 @@ import kotlinx.serialization.json.Json
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "falcor_prefs")
 
+
+@Serializable
+data class PersistedCameraCapability(
+    val name: String,
+    val showTalk: Boolean = false,
+    val talkStreamName: String? = null,
+    val liveStreamName: String? = null,
+    val showPtz: Boolean = false,
+    val streamNames: List<String> = emptyList()
+)
+
 @Serializable
 enum class TileSpan { SMALL, MEDIUM, LARGE }
 
@@ -63,9 +74,27 @@ class AppPreferences(private val context: Context) {
         }
     }
 
+    val cameraCapabilities: Flow<Map<String, PersistedCameraCapability>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[KEY_CAMERA_CAPS] ?: return@map emptyMap()
+        runCatching {
+            json.decodeFromString<List<PersistedCameraCapability>>(raw).associateBy { it.name }
+        }.getOrDefault(emptyMap())
+    }
+
+    suspend fun saveCameraCapabilities(caps: List<PersistedCameraCapability>) {
+        context.dataStore.edit {
+            it[KEY_CAMERA_CAPS] = json.encodeToString(caps)
+        }
+    }
+
+    suspend fun clearCameraCapabilities() {
+        context.dataStore.edit { it.remove(KEY_CAMERA_CAPS) }
+    }
+
     companion object {
         private val KEY_SHOW_DETECTIONS = booleanPreferencesKey("show_detections")
         private val KEY_PTZ_INVERT = booleanPreferencesKey("ptz_invert_pan_tilt")
         private val KEY_DASHBOARDS = stringPreferencesKey("dashboards_json")
+        private val KEY_CAMERA_CAPS = stringPreferencesKey("camera_capabilities_json")
     }
 }

@@ -33,7 +33,8 @@ class HomeViewModel(
     fun refresh() {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = false) }
-            repository.ensureConfig()
+            // Always re-scan /api/config (+ talk/live stream map) on home load.
+            repository.refreshCapabilities(forceConfig = true)
             val result = repository.getCameras()
             _state.update {
                 if (result.isSuccess) {

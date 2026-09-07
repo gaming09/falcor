@@ -241,7 +241,10 @@ data class CameraCapabilities(
     val ptzPresets: List<String>,
     /** Show Talk UI (WebRTC WebView). */
     val showTalk: Boolean,
+    /** Best go2rtc stream for two-way talk (may equal [liveStreamName]). */
     val talkStreamName: String?,
+    /** Preferred go2rtc stream for live listen (MSE/WebRTC without mic). */
+    val liveStreamName: String?,
     val audioEnabled: Boolean,
     val streamNames: List<String>,
     val liveRoleMap: Map<String, String>,
@@ -402,6 +405,7 @@ fun deriveCameraCapabilities(
     val showPtz = onvifConfigured || apiSupported
     val (talk, talkStream) = detectTalkCapability(name, camera, go2rtc, streams)
     val vendors = detectVendorHints(camera, go2rtc, streams)
+    val liveName = resolvePreferredLiveStreamName(name, camera, streams, go2rtc?.streamKeys.orEmpty())
     return CameraCapabilities(
         name = name,
         enabled = camera.isEnabled,
@@ -412,13 +416,38 @@ fun deriveCameraCapabilities(
         supportsFocus = ptzInfo?.supportsFocus == true,
         ptzPresets = ptzInfo?.presets.orEmpty(),
         showTalk = talk,
-        talkStreamName = talkStream,
+        talkStreamName = talkStream ?: (if (talk) liveName else null),
+        liveStreamName = liveName,
         audioEnabled = camera.audio?.enabled == true,
         streamNames = streams,
         liveRoleMap = camera.live?.streams.orEmpty(),
         vendorHints = vendors,
         thumbnailUrl = "$baseUrl/api/$name/latest.jpg"
     )
+}
+
+/** Prefer camera.live.streams main/sub role, else first resolved stream name. */
+fun resolvePreferredLiveStreamName(
+    cameraName: String,
+    camera: CameraConfig,
+    streamNames: List<String>,
+    go2rtcKeys: Set<String>
+): String {
+    val roleMap = camera.live?.streams.orEmpty()
+    fun pick(sub: Boolean): String? {
+        val entry = roleMap.entries.firstOrNull { (role, _) ->
+            if (sub) role.contains("sub", true)
+            else role.contains("main", true) || role.equals("stream", true)
+        }
+        return entry?.value?.trim()?.takeIf { it.isNotEmpty() }
+    }
+    val fromRole = pick(sub = true) ?: pick(sub = false) ?: roleMap.values.firstOrNull()?.trim()
+    if (!fromRole.isNullOrBlank() && (go2rtcKeys.isEmpty() || fromRole in go2rtcKeys)) return fromRole
+    val fromNames = streamNames.firstOrNull { !TALK_KEY_MARKERS.any { m -> it.contains(m, true) } }
+        ?: streamNames.firstOrNull()
+    if (!fromNames.isNullOrBlank()) return fromNames
+    if (cameraName in go2rtcKeys) return cameraName
+    return cameraName
 }
 
 fun CameraCapabilities.toUi(): CameraUiModel = CameraUiModel(

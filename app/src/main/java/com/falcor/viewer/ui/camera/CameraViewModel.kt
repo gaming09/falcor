@@ -116,7 +116,11 @@ class CameraViewModel(
     fun load() {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = false) }
-            repository.ensureConfig()
+            if (repository.allCachedCapabilities().isEmpty()) {
+                repository.refreshCapabilities(forceConfig = true)
+            } else {
+                repository.ensureConfig()
+            }
             val capsResult = repository.getCameraCapabilities(cameraName)
             val caps = capsResult.getOrNull()
             val cameras = repository.getCameras()
@@ -454,10 +458,15 @@ class CameraViewModel(
             return
         }
         val cam = _state.value.camera
-        val caps = _state.value.capabilities
+        val caps = _state.value.capabilities ?: repository.cachedCapabilities(cameraName)
         val talkName = caps?.talkStreamName
             ?: repository.talkStreamName(cam?.streamNames.orEmpty(), cameraName)
+            ?: caps?.liveStreamName
             ?: cameraName
+        android.util.Log.i(
+            "CameraViewModel",
+            "PTT start camera=$cameraName talkStream=$talkName live=${caps?.liveStreamName} showTalk=${caps?.showTalk}"
+        )
         val candidates = repository.webrtcTalkPageUrls(cameraName, talkName)
         if (candidates.isEmpty()) {
             viewModelScope.launch { _messages.emit(CameraUserMessage.TalkWebRtcFailed) }

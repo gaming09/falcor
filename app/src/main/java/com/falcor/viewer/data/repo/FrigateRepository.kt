@@ -14,6 +14,8 @@ import com.falcor.viewer.data.model.RecordingSegment
 import com.falcor.viewer.data.model.deriveCameraCapabilities
 import com.falcor.viewer.data.model.resolveStreamNames
 import com.falcor.viewer.data.model.toUi
+import com.falcor.viewer.data.prefs.AppPreferences
+import com.falcor.viewer.data.prefs.PersistedCameraCapability
 import com.falcor.viewer.data.prefs.SecureCredentialStore
 import com.falcor.viewer.data.ws.FrigateWsClient
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -35,10 +38,15 @@ import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLPeerUnverifiedException
 
 class FrigateRepository(
-    private val credentialStore: SecureCredentialStore
+    private val credentialStore: SecureCredentialStore,
+    private val appPreferences: AppPreferences? = null
 ) {
     private var api: FrigateApi? = null
     private var cachedConfig: FrigateConfig? = null
+
+    /** In-memory capability map rebuilt on login / resume / refresh. */
+    @Volatile
+    private var capabilityMap: Map<String, CameraCapabilities> = emptyMap()
 
     private val _sessionReady = MutableStateFlow(false)
     val sessionReady: StateFlow<Boolean> = _sessionReady.asStateFlow()
@@ -68,7 +76,11 @@ class FrigateRepository(
     /** Ensure [cachedConfig] is populated from GET /api/config (login + session restore path). */
     suspend fun ensureConfig(): Result<FrigateConfig> = withContext(Dispatchers.IO) {
         runCatching {
-            cachedConfig ?: requireApi().getConfig().also { cachedConfig = it }
+            val config = cachedConfig ?: requireApi().getConfig().also { cachedConfig = it }
+            if (capabilityMap.isEmpty() && config.cameras.isNotEmpty()) {
+                rebuildCapabilityMap(config, fetchGo2rtc = false)
+            }
+            config
         }
     }
 
@@ -112,6 +124,8 @@ class FrigateRepository(
                 _sessionReady.value = true
                 // Refresh WS with new token on next connect
                 disconnectPtzWs(force = true)
+                // Always rebuild camera capability map (talk/live streams) right after login.
+                rebuildCapabilityMap(config, fetchGo2rtc = true)
                 config
             }.recoverCatching { t ->
                 Log.e(TAG, "login failed: ${t.message}", t)
@@ -159,7 +173,11 @@ class FrigateRepository(
         credentialStore.clear()
         api = null
         cachedConfig = null
+        capabilityMap = emptyMap()
         _sessionReady.value = false
+        runCatching {
+            runBlocking { appPreferences?.clearCameraCapabilities() }
+        }
     }
 
     private fun requireApi(): FrigateApi =
@@ -184,7 +202,7 @@ class FrigateRepository(
         }
     }
 
-    /** Full capability snapshot for one camera (uses cached config). */
+    /** Full capability snapshot for one camera (uses capability map + fresh ptz/info). */
     suspend fun getCameraCapabilities(camera: String): Result<CameraCapabilities> =
         withContext(Dispatchers.IO) {
             runCatching {
@@ -192,7 +210,18 @@ class FrigateRepository(
                 val cam = config.cameras[camera]
                     ?: error("Camera not in config: $camera")
                 val ptzInfo = runCatching { requireApi().getPtzInfo(camera) }.getOrNull()
-                deriveCameraCapabilities(camera, cam, config, baseUrl, ptzInfo)
+                val derived = deriveCameraCapabilities(camera, cam, config, baseUrl, ptzInfo)
+                val cached = capabilityMap[camera]
+                val merged = if (cached != null) {
+                    derived.copy(
+                        showTalk = cached.showTalk || derived.showTalk,
+                        talkStreamName = cached.talkStreamName ?: derived.talkStreamName,
+                        liveStreamName = cached.liveStreamName ?: derived.liveStreamName,
+                        streamNames = cached.streamNames.ifEmpty { derived.streamNames }
+                    )
+                } else derived
+                capabilityMap = capabilityMap + (camera to merged)
+                merged
             }
         }
 
@@ -490,25 +519,29 @@ class FrigateRepository(
         val config = cachedConfig
         val go2rtc = config?.go2rtc
         val camCfg = config?.cameras?.get(camera)
+        val caps = capabilityMap[camera]
         val roleMap = camCfg?.live?.streams.orEmpty()
-        val preferred = resolvePreferredStreamName(
-            camera = camera,
-            preferSub = preferSub,
-            roleMap = roleMap,
-            streamNames = streamNames.ifEmpty {
-                camCfg?.let { resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty()) }.orEmpty()
-            },
-            go2rtcKeys = go2rtc?.streamKeys.orEmpty()
-        )
+        val preferred = caps?.liveStreamName?.takeIf { it.isNotBlank() }
+            ?: resolvePreferredStreamName(
+                camera = camera,
+                preferSub = preferSub,
+                roleMap = roleMap,
+                streamNames = streamNames.ifEmpty {
+                    camCfg?.let { resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty()) }.orEmpty()
+                },
+                go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+            )
         val names = linkedSetOf(preferred, camera).filter { it.isNotBlank() }
         val enc = { s: String -> java.net.URLEncoder.encode(s, Charsets.UTF_8.name()) }
+        // Request unmuted listen audio (no mic) — matches Frigate web Live player.
+        val media = "media=video%2Baudio"
         return buildList {
             names.forEach { n ->
                 val e = enc(n)
-                add("$base/live/webrtc/webrtc.html?src=$e")
-                add("$base/api/go2rtc/webrtc.html?src=$e")
-                add("$base/api/go2rtc/stream.html?src=$e")
-                add("$base/live/mse/mse.html?src=$e")
+                add("$base/live/webrtc/webrtc.html?src=$e&$media")
+                add("$base/api/go2rtc/webrtc.html?src=$e&$media")
+                add("$base/api/go2rtc/stream.html?src=$e&$media")
+                add("$base/live/mse/mse.html?src=$e&$media")
             }
             // Frigate camera hash route (SPA) — last resort embed
             add("$base/#$camera")
@@ -524,14 +557,97 @@ class FrigateRepository(
 
     fun webrtcTalkPageUrls(camera: String, streamName: String?): List<String> {
         val base = baseUrl.trimEnd('/')
-        val src = (streamName ?: camera).trim().ifBlank { camera }
+        val caps = capabilityMap[camera]
+        val src = (streamName
+            ?: caps?.talkStreamName
+            ?: caps?.liveStreamName
+            ?: camera).trim().ifBlank { camera }
         val encoded = java.net.URLEncoder.encode(src, Charsets.UTF_8.name())
+        // Explicit mic — go2rtc defaults to video+audio only (no microphone / ugly controls page).
+        val media = "media=video%2Baudio%2Bmicrophone"
         return listOf(
-            "$base/live/webrtc/webrtc.html?src=$encoded",
-            "$base/live/webrtc/index.html?src=$encoded",
-            "$base/api/go2rtc/webrtc.html?src=$encoded",
-            "$base/api/go2rtc/stream.html?src=$encoded"
+            "$base/live/webrtc/webrtc.html?src=$encoded&$media",
+            "$base/live/webrtc/index.html?src=$encoded&$media",
+            "$base/api/go2rtc/webrtc.html?src=$encoded&$media",
+            "$base/api/go2rtc/stream.html?src=$encoded&$media"
         ).distinct()
+    }
+
+    fun cachedCapabilities(camera: String): CameraCapabilities? = capabilityMap[camera]
+
+    fun allCachedCapabilities(): Map<String, CameraCapabilities> = capabilityMap
+
+    /**
+     * Always GET /api/config (and optionally go2rtc streams), rebuild per-camera
+     * talk/live capability map, persist, and log what was detected.
+     * Call after login and on app resume when a session exists.
+     */
+    suspend fun refreshCapabilities(forceConfig: Boolean = true): Result<Map<String, CameraCapabilities>> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                if (!_sessionReady.value && credentials?.isConfigured != true) {
+                    return@runCatching emptyMap()
+                }
+                val config = if (forceConfig) {
+                    requireApi().getConfig().also { cachedConfig = it }
+                } else {
+                    cachedConfig ?: requireApi().getConfig().also { cachedConfig = it }
+                }
+                rebuildCapabilityMap(config, fetchGo2rtc = true)
+                capabilityMap
+            }
+        }
+
+    private suspend fun rebuildCapabilityMap(config: FrigateConfig, fetchGo2rtc: Boolean) {
+        // Optional: merge live go2rtc stream keys from API (keys may exist beyond config snapshot).
+        if (fetchGo2rtc) {
+            runCatching {
+                val body = requireApi().go2rtcStreams().body()?.string().orEmpty()
+                if (body.isNotBlank()) {
+                    Log.d(TAG, "go2rtc/streams fetched (${body.length} chars) for capability scan")
+                }
+            }.onFailure { Log.d(TAG, "go2rtc/streams optional fetch skipped: ${it.message}") }
+        }
+        val base = baseUrl
+        val map = LinkedHashMap<String, CameraCapabilities>()
+        // Skip per-camera PTZ HTTP here (slow); ONVIF/config is enough for talk/live mapping.
+        // Camera screen still fetches ptz/info when opened.
+        for ((name, cam) in config.cameras) {
+            val caps = deriveCameraCapabilities(name, cam, config, base, ptzInfo = null)
+            map[name] = caps
+            Log.i(
+                TAG,
+                "Camera capabilities [$name]: talk=${caps.showTalk} " +
+                    "talkStream=${caps.talkStreamName} liveStream=${caps.liveStreamName} " +
+                    "ptz=${caps.showPtz} streams=${caps.streamNames} vendors=${caps.vendorHints}"
+            )
+            if (!caps.showTalk) {
+                val sources = caps.streamNames.flatMap { config.go2rtc?.sourceStrings(it).orEmpty() }
+                if (sources.any { s ->
+                        val l = s.lowercase()
+                        l.contains("onvif://") || l.contains("reolink://") ||
+                            l.contains("backchannel") || l.contains("audio=opus")
+                    }
+                ) {
+                    Log.w(TAG, "Camera [$name] has talk-like go2rtc sources but showTalk=false — check detection")
+                }
+            }
+        }
+        capabilityMap = map
+        val persisted = map.values.map {
+            PersistedCameraCapability(
+                name = it.name,
+                showTalk = it.showTalk,
+                talkStreamName = it.talkStreamName,
+                liveStreamName = it.liveStreamName,
+                showPtz = it.showPtz,
+                streamNames = it.streamNames
+            )
+        }
+        runCatching { appPreferences?.saveCameraCapabilities(persisted) }
+            .onFailure { Log.w(TAG, "Failed to persist capability map: ${it.message}") }
+        val talkCams = map.values.filter { it.showTalk }.map { "${it.name}->${it.talkStreamName}" }
+        Log.i(TAG, "Capability scan complete: ${map.size} cameras, talk-capable: $talkCams")
     }
 
     /** Bearer token value without "Bearer " prefix, for WebView cookie injection. */

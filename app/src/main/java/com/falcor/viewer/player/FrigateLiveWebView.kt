@@ -135,31 +135,53 @@ fun FrigateLiveWebView(
     }
 }
 
-private const val UNMUTE_JS = """
+/** Strip HTML5 controls chrome, unmute, autoplay — keep black fullscreen video box. */
+private const val PLAYER_CHROME_JS = """
 (function(){
-  function unmuteAll(){
+  function stylePlayer(){
     try {
+      if (!document.getElementById('falcor-player-css')) {
+        var s = document.createElement('style');
+        s.id = 'falcor-player-css';
+        s.textContent = [
+          'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;}',
+          'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;position:fixed!important;inset:0!important;z-index:1!important;}',
+          'video::-webkit-media-controls{display:none!important;}',
+          'video::-webkit-media-controls-enclosure{display:none!important;}',
+          'video::-webkit-media-controls-panel{display:none!important;}',
+          'video::-webkit-media-controls-start-playback-button{display:none!important;}',
+          '.vjs-control-bar,.video-js .vjs-big-play-button,button.play,[class*=control],[class*=Controls],.plyr__controls{display:none!important;opacity:0!important;pointer-events:none!important;}'
+        ].join('');
+        (document.head || document.documentElement).appendChild(s);
+      }
       document.querySelectorAll('video,audio').forEach(function(v){
         try {
+          v.removeAttribute('controls');
+          v.controls = false;
+          v.setAttribute('playsinline','');
+          v.setAttribute('webkit-playsinline','');
           v.muted = false;
           v.defaultMuted = false;
           v.volume = 1.0;
-          if (v.paused) {
-            var p = v.play();
-            if (p && p.catch) p.catch(function(){});
-          }
+          var p = v.play();
+          if (p && p.catch) p.catch(function(){});
         } catch(e) {}
       });
-      var btn = document.querySelector('button[aria-label*="play" i],button.play,button[title*="play" i]');
+      // Click any lingering big-play overlay once (then hide via CSS).
+      var btn = document.querySelector('button[aria-label*="play" i],button.play,button[title*="play" i],.vjs-big-play-button');
       if (btn) try { btn.click(); } catch(e) {}
     } catch(e) {}
   }
-  unmuteAll();
-  if (!window.__falcorUnmuteTimer) {
-    window.__falcorUnmuteTimer = setInterval(unmuteAll, 1500);
+  stylePlayer();
+  if (!window.__falcorPlayerTimer) {
+    window.__falcorPlayerTimer = setInterval(stylePlayer, 800);
   }
+  document.addEventListener('DOMContentLoaded', stylePlayer);
 })();
 """
+
+/** @deprecated use PLAYER_CHROME_JS */
+private const val UNMUTE_JS = PLAYER_CHROME_JS
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -208,13 +230,18 @@ private fun keyAndroidView(
                 webChromeClient = object : WebChromeClient() {
                     override fun onPermissionRequest(request: PermissionRequest?) {
                         if (request == null) return
-                        // Grant audio/video capture for go2rtc talk + live WebRTC.
-                        val wanted = request.resources
+                        // Always grant AUDIO_CAPTURE / VIDEO_CAPTURE for go2rtc talk + live WebRTC.
+                        // (Android RECORD_AUDIO must already be granted by the activity before PTT.)
+                        val wanted = request.resources ?: return
                         val grant = wanted.filter {
                             it == PermissionRequest.RESOURCE_AUDIO_CAPTURE ||
                                 it == PermissionRequest.RESOURCE_VIDEO_CAPTURE ||
                                 it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
                         }.toTypedArray()
+                        android.util.Log.d(
+                            "FrigateLiveWebView",
+                            "onPermissionRequest origin=${request.origin} resources=${wanted.toList()} grant=${grant.toList()} allowMic=$allowMic"
+                        )
                         if (grant.isNotEmpty()) {
                             request.grant(grant)
                         } else {
@@ -233,11 +260,11 @@ private fun keyAndroidView(
                             "var s2=document.createElement('style');s2.innerHTML='canvas,.bounding-box,[class*=detect]{display:none!important;}';document.head.appendChild(s2);"
                         } else ""
                         view?.evaluateJavascript(
-                            "(function(){var s=document.createElement('style');s.innerHTML='body{margin:0;background:#000;overflow:hidden;}video{width:100%!important;height:100%!important;object-fit:contain!important;}';document.head.appendChild(s);$hideBoxes})();",
+                            "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;}video::-webkit-media-controls{display:none!important;}';document.head.appendChild(s);$hideBoxes})();",
                             null
                         )
-                        // Unmute + play HTML5 media (live audio).
-                        view?.evaluateJavascript(UNMUTE_JS, null)
+                        // Remove controls, unmute, autoplay (live listen + talk).
+                        view?.evaluateJavascript(PLAYER_CHROME_JS, null)
                     }
 
                     override fun onReceivedError(
@@ -277,7 +304,7 @@ private fun keyAndroidView(
                 webView.loadUrl(pageUrl, headers)
             } else {
                 // Re-assert unmute when recomposing while same URL (e.g. talk hold).
-                webView.evaluateJavascript(UNMUTE_JS, null)
+                webView.evaluateJavascript(PLAYER_CHROME_JS, null)
             }
         }
     )

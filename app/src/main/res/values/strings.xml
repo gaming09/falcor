@@ -54,10 +54,10 @@
     <string name="camera_stream_sub">Sub stream</string>
     <string name="camera_talk">Hold to talk</string>
     <string name="camera_talk_on">Talking…</string>
-    <string name="camera_talk_hold_hint">Press and hold the mic to talk; release to stop. Uses Frigate go2rtc WebRTC inline (no dialog).</string>
-    <string name="camera_talk_unavailable">Two-way audio not available</string>
+    <string name="camera_talk_hold_hint">Press and hold the mic to talk; release to stop. Reconnects the same live frame with WebRTC mic (media=video+audio+microphone) — no dialog, no HTML player chrome.</string>
+    <string name="camera_talk_unavailable">Two-way audio not detected in Frigate/go2rtc config for this camera</string>
     <string name="camera_talk_webrtc_title">Two-way talk</string>
-    <string name="camera_talk_webrtc_hint">Press and hold mic on the camera view. Uses Frigate go2rtc WebRTC with microphone permission.</string>
+    <string name="camera_talk_webrtc_hint">Press and hold mic on the camera view. Uses Frigate go2rtc WebRTC with media=video+audio+microphone and WebView mic permission.</string>
     <string name="camera_talk_webrtc_failed">Could not open WebRTC talk. Ensure go2rtc has an onvif://, reolink://, or talk stream with audio for this camera.</string>
     <string name="camera_talk_close">Close</string>
     <string name="camera_ptz">PTZ</string>

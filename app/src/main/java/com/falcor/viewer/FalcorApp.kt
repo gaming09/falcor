@@ -18,8 +18,8 @@ class FalcorApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         credentialStore = SecureCredentialStore(this)
-        repository = FrigateRepository(credentialStore)
         appPreferences = AppPreferences(this)
+        repository = FrigateRepository(credentialStore, appPreferences)
     }
 
     /** Coil uses the same trusted OkHttp client + JWT as Retrofit thumbnails/API. */

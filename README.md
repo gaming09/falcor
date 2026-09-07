@@ -3,16 +3,16 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.5**
+Version: **0.1.6**
 
-## Features (0.1.5)
+## Features (0.1.6)
 
-- **Live audio** — WebView live unmuted (autoplay + JS unmute); LibVLC live path unmuted; audio focus requested.
-- **Pinch-zoom + pan** on **all** live surfaces (WebView, VLC, OkHttp preview) and fullscreen — multi-touch handled so WebView cannot steal pinches.
-- **Press-and-hold talk** — hold the mic on the main camera view (Frigate-style); no overlay dialog. Releases restore normal live URLs. WebView grants `getUserMedia` mic/camera permissions.
-- **Stronger PTZ** — while held, MOVE_*/ZOOM_*/FOCUS_* are **re-sent every ~300ms** until release (helps sluggish Reolink/ONVIF continuous move); then STOP once. Larger hold targets with pressed feedback; bottom-sheet gestures cannot steal Down/Left. Optional **Invert pan/tilt** toggle for reversed axes.
-- **Smooth live** — authenticated WebView embedding Frigate/go2rtc WebRTC/MSE pages, then LibVLC, then OkHttp MJPEG / `latest.jpg`.
-- Fullscreen, clip seek/download, detection boxes, dashboards, single-camera Cast (unchanged core).
+- **Config capability scan on login / resume** — always `GET /api/config` (and optionally `GET /api/go2rtc/streams`) after login and when the app resumes with a saved session. Builds a per-camera map of `liveStreamName` / `talkStreamName` / talk+PTZ flags, persists it, and logs what was detected (no silent “talk unavailable” when config has talk).
+- **Press-and-hold talk (Frigate-style)** — keeps the **same** live player frame (black, no HTML5 controls / play button). On hold, reconnects WebRTC with `media=video+audio+microphone` (prefer dedicated talk stream). On release, restores listen URLs with `media=video+audio`. Thin “Talking…” badge only — never a dialog.
+- **Live listen audio** — default live WebRTC/MSE pages request `media=video+audio`; WebView JS removes `controls`, unmutes, and autoplays.
+- **Pinch-zoom + pan** on all live surfaces and fullscreen.
+- **Stronger PTZ** — hold re-sends MOVE/ZOOM/FOCUS every ~300ms; optional invert pan/tilt.
+- Smooth live WebView → LibVLC → OkHttp MJPEG / snapshot fallback; fullscreen, clips, dashboards, Cast.
 
 ## Requirements
 
@@ -40,15 +40,23 @@ Frigate :8971 uses JWT (not HTTP Basic). Falcor trusts self-signed TLS for local
 
 ### Live path
 
-1. WebView go2rtc/Frigate live player pages (smooth, with audio)
+1. WebView go2rtc/Frigate live player pages with `media=video+audio` (smooth, unmuted)
 2. LibVLC on config-derived HLS/MJPEG/RTSP candidates (unmuted)
 3. OkHttp MJPEG / snapshot poll (fallback)
 
 ### Two-way talk
 
-Press and hold **Hold to talk** on the camera screen. Falcor navigates the main live WebView to go2rtc WebRTC talk URLs and grants WebView mic permission. Release returns to normal live.
+Press and hold **Hold to talk** on the camera screen. Falcor:
 
-**Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio (e.g. `onvif://…`, `reolink://…`, or a dedicated talk source with audio backchannel). If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera — Falcor cannot invent a talk path the server does not expose.
+1. Keeps the same black WebView frame (no ugly HTML5 player chrome).
+2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks with the same `media=`).
+3. Grants WebView `AUDIO_CAPTURE` via `WebChromeClient.onPermissionRequest`.
+4. Injects CSS/JS to strip `controls`, unmute, and autoplay.
+5. On release, restores previous live URLs with `media=video+audio` (listen only).
+
+Talk streams are detected at login/resume from go2rtc source strings (`onvif://`, `reolink://`, backchannel, `#audio=opus`) and dedicated talk keys — see Logcat tag `FrigateRepository` for the capability scan summary.
+
+**Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio. If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera.
 
 ### PTZ
 
