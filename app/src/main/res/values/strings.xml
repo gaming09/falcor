@@ -63,6 +63,7 @@
     <string name="camera_talk_webrtc_title">Two-way talk</string>
     <string name="camera_talk_webrtc_hint">Press and hold mic on the camera view. Uses Frigate go2rtc WebRTC with media=video+audio+microphone and WebView mic permission.</string>
     <string name="camera_talk_webrtc_failed">Could not open WebRTC talk. Ensure go2rtc has an onvif://, reolink://, or talk stream with audio for this camera.</string>
+    <string name="camera_talk_no_candidates">No talk WebRTC pages for stream "%1$s". Check go2rtc talk/backchannel config.</string>
     <string name="camera_talk_close">Close</string>
     <string name="camera_ptz">PTZ</string>
     <string name="camera_ptz_open">Open PTZ controls</string>

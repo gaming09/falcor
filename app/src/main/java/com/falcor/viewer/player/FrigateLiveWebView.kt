@@ -2,7 +2,12 @@ package com.falcor.viewer.player
 
 import android.annotation.SuppressLint
 import android.graphics.Color
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.PermissionRequest
@@ -37,6 +42,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.falcor.viewer.R
 import java.net.URI
 import java.util.concurrent.atomic.AtomicInteger
+
 
 /**
  * Holds a stable [WebView] reference so mute/unmute can run
@@ -122,17 +128,42 @@ fun FrigateLiveWebView(
         controllerState?.applyMute(muted)
     }
 
-    // Request audio focus so live audio is audible over other apps when possible.
+    // Request STREAM_MUSIC audio focus so live WebView audio is audible.
     DisposableEffect(Unit) {
         val am = context.getSystemService(AudioManager::class.java)
-        val result = am?.requestAudioFocus(
-            { },
-            AudioManager.STREAM_MUSIC,
-            AudioManager.AUDIOFOCUS_GAIN
-        )
+        var focusRequest: AudioFocusRequest? = null
+        var legacyGranted = false
+        if (am != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                            .build()
+                    )
+                    .setAcceptsDelayedFocusGain(true)
+                    .setOnAudioFocusChangeListener { }
+                    .build()
+                focusRequest = req
+                am.requestAudioFocus(req)
+            } else {
+                @Suppress("DEPRECATION")
+                val result = am.requestAudioFocus(
+                    { },
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN
+                )
+                legacyGranted = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            }
+        }
         onDispose {
-            if (result != null) {
-                am?.abandonAudioFocus { }
+            if (am == null) return@onDispose
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                focusRequest?.let { runCatching { am.abandonAudioFocusRequest(it) } }
+            } else if (legacyGranted) {
+                @Suppress("DEPRECATION")
+                am.abandonAudioFocus { }
             }
         }
     }
@@ -155,7 +186,14 @@ fun FrigateLiveWebView(
                 allowMicrophone = allowMicState,
                 muted = mutedState,
                 audioController = controllerState,
-                onPlaying = { loading = false; onPlayingState?.invoke() },
+                onPlaying = {
+                    loading = false
+                    onPlayingState?.invoke()
+                    // After media starts: unmute+play once so streams are not stuck muted.
+                    if (!mutedState) {
+                        controllerState?.applyMute(false)
+                    }
+                },
                 onMainFrameError = {
                     val next = candidateIndex + 1
                     if (next < urlsState.size) {
@@ -333,23 +371,32 @@ private fun keyAndroidView(
                     injectAuthCookie(pageUrl, "frigate_token", token)
                 }
 
+                // Mutable holder so update{} can refresh allowMic without recreating WebView.
+                val micAllowed = booleanArrayOf(allowMic)
+                setTag(com.falcor.viewer.R.id.falcor_webview_mic_tag, micAllowed)
                 webChromeClient = object : WebChromeClient() {
                     override fun onPermissionRequest(request: PermissionRequest?) {
                         if (request == null) return
                         val wanted = request.resources ?: return
-                        val grant = wanted.filter {
-                            it == PermissionRequest.RESOURCE_AUDIO_CAPTURE ||
-                                it == PermissionRequest.RESOURCE_VIDEO_CAPTURE ||
-                                it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
+                        val allow = (getTag(com.falcor.viewer.R.id.falcor_webview_mic_tag) as? BooleanArray)
+                            ?.getOrNull(0) == true
+                        // Always grant PROTECTED_MEDIA_ID (EME). AUDIO/VIDEO capture only for talk.
+                        val grant = wanted.filter { res ->
+                            when (res) {
+                                PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID -> true
+                                PermissionRequest.RESOURCE_AUDIO_CAPTURE,
+                                PermissionRequest.RESOURCE_VIDEO_CAPTURE -> allow
+                                else -> false
+                            }
                         }.toTypedArray()
                         android.util.Log.d(
                             "FrigateLiveWebView",
-                            "onPermissionRequest origin=${request.origin} resources=${wanted.toList()} grant=${grant.toList()} allowMic=$allowMic"
+                            "onPermissionRequest origin=${request.origin} resources=${wanted.toList()} grant=${grant.toList()} allowMic=$allow"
                         )
                         if (grant.isNotEmpty()) {
                             request.grant(grant)
                         } else {
-                            request.grant(wanted)
+                            request.deny()
                         }
                     }
                 }
@@ -364,13 +411,23 @@ private fun keyAndroidView(
                             "var s2=document.createElement('style');s2.innerHTML='canvas,.bounding-box,[class*=detect]{display:none!important;}';document.head.appendChild(s2);"
                         } else ""
                         view?.evaluateJavascript(
-                            "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;pointer-events:auto!important;}';document.head.appendChild(s);$hideBoxes})();",
+                            "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;pointer-events:auto!important;z-index:1!important;}';document.head.appendChild(s);$hideBoxes})();",
                             null
                         )
-                        // Start unmuted unless Compose says muted; autoplay-with-sound may still
-                        // fail until mute-button tap (user gesture) re-applies unmute+play.
+                        // Default unmuted: tracks enabled, volume 1, muted=false, AudioContext.resume.
                         view?.evaluateJavascript(muteFlagJs(mutedFlag) + PLAYER_CHROME_JS, null)
                         view?.evaluateJavascript(applyMuteJs(mutedFlag), null)
+                        // Retry unmute+play a few times after load — MSE/WebRTC often attaches late.
+                        if (!mutedFlag && view != null) {
+                            val handler = Handler(Looper.getMainLooper())
+                            listOf(400L, 1200L, 2500L).forEach { delayMs ->
+                                handler.postDelayed({
+                                    runCatching {
+                                        view.evaluateJavascript(applyMuteJs(false), null)
+                                    }
+                                }, delayMs)
+                            }
+                        }
                     }
 
                     override fun onReceivedError(
@@ -398,8 +455,8 @@ private fun keyAndroidView(
             }
         },
         update = { webView ->
-            @Suppress("UNUSED_EXPRESSION")
-            allowMic
+            (webView.getTag(com.falcor.viewer.R.id.falcor_webview_mic_tag) as? BooleanArray)
+                ?.set(0, allowMic)
             controller?.attach(webView)
             if (webView.url != pageUrl) {
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")

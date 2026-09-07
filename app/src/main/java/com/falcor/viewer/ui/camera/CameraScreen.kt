@@ -74,6 +74,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -120,6 +122,7 @@ fun CameraScreen(
     val context = LocalContext.current
     val activity = context as? Activity
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     val audioController = remember { WebViewAudioController() }
     val ptzWsError = stringResource(R.string.camera_ptz_ws_error)
     val ptzCmdError = stringResource(R.string.camera_ptz_command_error)
@@ -131,11 +134,14 @@ fun CameraScreen(
     val castNoDevice = stringResource(R.string.cast_no_device)
     val castAuthWarning = stringResource(R.string.cast_auth_url_warning)
     var pendingTalkAfterPermission by remember { mutableStateOf(false) }
+    val micDeniedMsg = stringResource(R.string.camera_permission_mic)
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted && pendingTalkAfterPermission) {
             viewModel.setTalking(true)
+        } else if (!granted && pendingTalkAfterPermission) {
+            scope.launch { snackbarHostState.showSnackbar(micDeniedMsg) }
         }
         pendingTalkAfterPermission = false
     }
@@ -149,6 +155,10 @@ fun CameraScreen(
                 CameraUserMessage.PtzWsFailed -> snackbarHostState.showSnackbar(ptzWsError)
                 CameraUserMessage.PtzCommandFailed -> snackbarHostState.showSnackbar(ptzCmdError)
                 CameraUserMessage.TalkWebRtcFailed -> snackbarHostState.showSnackbar(talkWebRtcError)
+                CameraUserMessage.TalkMicDenied -> snackbarHostState.showSnackbar(micDeniedMsg)
+                is CameraUserMessage.TalkNoCandidates -> snackbarHostState.showSnackbar(
+                    context.getString(R.string.camera_talk_no_candidates, msg.talkStream)
+                )
                 CameraUserMessage.HistoryNotFound -> snackbarHostState.showSnackbar(historyNotFound)
                 CameraUserMessage.HistoryDownloadFailed -> snackbarHostState.showSnackbar(historyFailed)
                 is CameraUserMessage.ClipSaved ->
@@ -515,19 +525,32 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // Talk / PTT: WebView (mic + WebRTC backchannel).
-                    state.talking && webUrls.isNotEmpty() -> {
-                        FrigateLiveWebView(
-                            pageUrls = webUrls,
-                            bearerToken = viewModel.jwtTokenRaw(),
-                            fillAspect = false,
-                            showDetections = false,
-                            allowMicrophone = true,
-                            muted = false,
-                            audioController = audioController,
-                            onAllFailed = { viewModel.onTalkWebRtcFailed() },
-                            modifier = Modifier.fillMaxSize()
-                        )
+                    // Talk / PTT: WebView only (mic + WebRTC backchannel) — never fall through to Exo.
+                    state.talking -> {
+                        if (webUrls.isNotEmpty()) {
+                            FrigateLiveWebView(
+                                pageUrls = webUrls,
+                                bearerToken = viewModel.jwtTokenRaw(),
+                                fillAspect = false,
+                                showDetections = false,
+                                allowMicrophone = true,
+                                muted = false,
+                                audioController = audioController,
+                                onAllFailed = { viewModel.onTalkWebRtcFailed() },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Box(
+                                Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    stringResource(R.string.camera_talk_on),
+                                    color = Color.White,
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+                        }
                     }
                     // Primary live: single go2rtc/Frigate WebView embed (webrtc.html / mse).
                     state.useWebViewLive && state.isLive && webUrls.isNotEmpty() -> {

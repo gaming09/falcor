@@ -722,19 +722,26 @@ class FrigateRepository(
     fun webrtcTalkPageUrls(camera: String, streamName: String?): List<String> {
         val base = baseUrl.trimEnd('/')
         val caps = capabilityMap[camera]
-        val src = (streamName
+        val primary = (streamName
             ?: caps?.talkStreamName
             ?: caps?.liveStreamName
             ?: camera).trim().ifBlank { camera }
-        val encoded = java.net.URLEncoder.encode(src, Charsets.UTF_8.name())
+        // Prefer talk stream, then live src (same video → faster reconnect), then camera name.
+        val srcs = linkedSetOf(primary)
+        caps?.liveStreamName?.takeIf { it.isNotBlank() }?.let { srcs.add(it) }
+        srcs.add(camera)
         // Explicit mic — go2rtc defaults to video+audio only (no microphone / ugly controls page).
         val media = "media=video%2Baudio%2Bmicrophone"
-        return listOf(
-            "$base/live/webrtc/webrtc.html?src=$encoded&$media",
-            "$base/live/webrtc/index.html?src=$encoded&$media",
-            "$base/api/go2rtc/webrtc.html?src=$encoded&$media",
-            "$base/api/go2rtc/stream.html?src=$encoded&$media"
-        ).distinct()
+        val enc = { s: String -> java.net.URLEncoder.encode(s, Charsets.UTF_8.name()) }
+        return buildList {
+            srcs.forEach { src ->
+                val encoded = enc(src)
+                add("$base/live/webrtc/webrtc.html?src=$encoded&$media")
+                add("$base/live/webrtc/index.html?src=$encoded&$media")
+                add("$base/api/go2rtc/webrtc.html?src=$encoded&$media")
+                add("$base/api/go2rtc/stream.html?src=$encoded&$media")
+            }
+        }.distinct()
     }
 
     fun cachedCapabilities(camera: String): CameraCapabilities? = capabilityMap[camera]

@@ -79,6 +79,8 @@ sealed class CameraUserMessage {
     data object PtzWsFailed : CameraUserMessage()
     data object PtzCommandFailed : CameraUserMessage()
     data object TalkWebRtcFailed : CameraUserMessage()
+    data object TalkMicDenied : CameraUserMessage()
+    data class TalkNoCandidates(val talkStream: String) : CameraUserMessage()
     data object HistoryNotFound : CameraUserMessage()
     data object HistoryDownloadFailed : CameraUserMessage()
     data class ClipSaved(val name: String) : CameraUserMessage()
@@ -160,7 +162,7 @@ class CameraViewModel(
                     ptzSupportsZoom = caps?.supportsZoom != false,
                     ptzSupportsFocus = caps?.supportsFocus == true,
                     ptzPresets = caps?.ptzPresets.orEmpty(),
-                    talkSupported = caps?.showTalk == true || model.supportsAudio
+                    talkSupported = computeTalkSupported(caps, model)
                 )
             }
             connectWsIfNeeded(ptzSupported || _state.value.showDetections)
@@ -601,7 +603,10 @@ class CameraViewModel(
         )
         val candidates = repository.webrtcTalkPageUrls(cameraName, talkName)
         if (candidates.isEmpty()) {
-            viewModelScope.launch { _messages.emit(CameraUserMessage.TalkWebRtcFailed) }
+            android.util.Log.w("CameraViewModel", "PTT no talk page URLs for talkStream=$talkName")
+            viewModelScope.launch {
+                _messages.emit(CameraUserMessage.TalkNoCandidates(talkName))
+            }
             return
         }
         if (_state.value.livePageUrls.isNotEmpty()) {
@@ -627,21 +632,18 @@ class CameraViewModel(
     private fun stopTalkInternal() {
         val s = _state.value
         if (!s.talking) return
-        val restore = livePagesBeforeTalk.ifEmpty { s.livePageUrls }
         val resumeLive = s.isLive && s.authenticatedClipUrl == null
-        _state.update {
-            it.copy(
-                talking = false,
-                talkWebRtcCandidates = emptyList(),
-                talkWebRtcIndex = 0,
-                activeWebViewUrls = emptyList(),
-                livePageUrls = restore,
-                useWebViewLive = false
-            )
-        }
-        // Leave talk WebView; restore WebView-primary live.
+        // Single atomic restore — never briefly clear useWebViewLive (that kills the feed).
         if (resumeLive) {
             applyLiveStream()
+        } else {
+            _state.update {
+                it.copy(
+                    talking = false,
+                    talkWebRtcCandidates = emptyList(),
+                    talkWebRtcIndex = 0
+                )
+            }
         }
     }
 
@@ -676,6 +678,30 @@ class CameraViewModel(
             ptzWsAcquired = false
         }
         super.onCleared()
+    }
+
+    /**
+     * Show Hold to talk when config marks talk, or when listen/audio + Reolink/ONVIF/backchannel
+     * heuristics suggest a two-way candidate exists.
+     */
+    private fun computeTalkSupported(
+        caps: CameraCapabilities?,
+        model: CameraUiModel
+    ): Boolean {
+        if (caps?.showTalk == true) return true
+        if (!caps?.talkStreamName.isNullOrBlank()) return true
+        if (model.supportsAudio && caps?.showTalk == true) return true
+        val vendors = caps?.vendorHints.orEmpty().map { it.lowercase() }
+        val talkishVendor = vendors.any {
+            it.contains("reolink") || it.contains("onvif") || it.contains("amcrest") ||
+                it.contains("dahua") || it.contains("hikvision")
+        }
+        if (talkishVendor && (caps?.hasListenAudio == true || caps?.audioEnabled == true || model.supportsAudio)) {
+            return true
+        }
+        // Last resort: any listen/audio capability — better to show PTT with a clear error
+        // than hide it when go2rtc markers were missed.
+        return model.supportsAudio
     }
 
     companion object {

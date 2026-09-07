@@ -282,11 +282,21 @@ private val TALK_SOURCE_MARKERS = listOf(
     "onvif://",
     "reolink://",
     "backchannel",
+    "#backchannel",
     "#audio=opus",
-    "audio=opus"
+    "audio=opus",
+    "codec=opus",
+    "rtspx://",
+    "isapi://",
+    "ffmpeg:rtsp",
+    "two-way",
+    "twoway",
+    "microphone"
 )
 
-private val TALK_KEY_MARKERS = listOf("talk", "twoway", "two_way", "two-way", "doorbell")
+private val TALK_KEY_MARKERS = listOf(
+    "talk", "twoway", "two_way", "two-way", "doorbell", "backchannel", "speaker"
+)
 
 private val VENDOR_HINTS = listOf(
     "reolink", "amcrest", "hikvision", "dahua", "axis", "unifi", "wyze", "onvif", "rtsp://"
@@ -382,11 +392,11 @@ fun detectTalkCapability(
 
     // Audio enabled + talk-capable go2rtc sources (opus / onvif / reolink / backchannel)
     val audioOn = camera.audio?.enabled == true
+    val preferred = streamNames.firstOrNull() ?: cameraName
+    val allSources = go2rtc?.sourceStrings(preferred).orEmpty() +
+        candidateKeys.flatMap { go2rtc?.sourceStrings(it).orEmpty() }
     if (audioOn) {
-        val preferred = streamNames.firstOrNull() ?: cameraName
-        val sources = go2rtc?.sourceStrings(preferred).orEmpty() +
-            candidateKeys.flatMap { go2rtc?.sourceStrings(it).orEmpty() }
-        if (sources.any { src ->
+        if (allSources.any { src ->
                 val lower = src.lowercase()
                 TALK_SOURCE_MARKERS.any { lower.contains(it) } ||
                     (lower.contains("ffmpeg:") && lower.contains("audio"))
@@ -394,6 +404,35 @@ fun detectTalkCapability(
         ) {
             return true to preferred
         }
+    }
+
+    // ONVIF host configured + audio/listen markers → likely two-way capable (Frigate ONVIF talk).
+    if (camera.hasOnvifHost || camera.onvif != null) {
+        val hasOpusOrBc = allSources.any { src ->
+            val lower = src.lowercase()
+            lower.contains("opus") || lower.contains("backchannel") ||
+                lower.contains("onvif://") || lower.contains("reolink://")
+        }
+        if (audioOn || hasOpusOrBc) {
+            val onvifKey = candidateKeys.firstOrNull { key ->
+                go2rtc?.sourceStrings(key).orEmpty().any { it.lowercase().contains("onvif://") }
+            } ?: preferred
+            return true to onvifKey
+        }
+    }
+
+    // Reolink / doorbell-style vendor hints with any audio → show talk.
+    val vendors = detectVendorHints(camera, go2rtc, streamNames).map { it.lowercase() }
+    if (vendors.any { it.contains("reolink") || it.contains("doorbell") } &&
+        (audioOn || allSources.any { s ->
+            val l = s.lowercase()
+            l.contains("audio") || l.contains("opus") || l.contains("reolink://")
+        } || allSources.isEmpty())
+    ) {
+        val reolinkKey = candidateKeys.firstOrNull { key ->
+            go2rtc?.sourceStrings(key).orEmpty().any { it.lowercase().contains("reolink://") }
+        } ?: preferred
+        return true to reolinkKey
     }
 
     return false to null
