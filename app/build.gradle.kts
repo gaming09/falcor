@@ -13,10 +13,14 @@ android {
         applicationId = "com.falcor.viewer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.1.10"
+        versionCode = 12
+        versionName = "0.1.11"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
+        ndk {
+            // Match stream-webrtc-android native ABIs
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+        }
     }
 
     buildTypes {
@@ -84,5 +88,6 @@ dependencies {
     implementation(libs.androidx.mediarouter)
     implementation(libs.androidx.appcompat)
     implementation(libs.play.services.cast.framework)
+    implementation(libs.stream.webrtc.android)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

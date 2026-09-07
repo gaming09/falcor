@@ -646,6 +646,57 @@ class FrigateRepository(
         }
     }
 
+    /**
+     * WHEP-style WebRTC signaling POST URLs (SDP offer body → SDP answer).
+     * Frigate nginx proxies POST /api/go2rtc/webrtc → go2rtc /api/webrtc.
+     * Optional direct go2rtc API listen when config publishes a non-loopback port.
+     */
+    fun webrtcLiveUrls(camera: String, preferSub: Boolean, streamNames: List<String>): List<String> {
+        val host = runCatching { URI(baseUrl).host }.getOrNull() ?: return emptyList()
+        val base = baseUrl.trimEnd('/')
+        val config = cachedConfig
+        val go2rtc = config?.go2rtc
+        val camCfg = config?.cameras?.get(camera)
+        val caps = capabilityMap[camera]
+        val roleMap = camCfg?.live?.streams.orEmpty()
+        val preferred = caps?.liveStreamName?.takeIf { it.isNotBlank() }
+            ?: resolvePreferredStreamName(
+                camera = camera,
+                preferSub = preferSub,
+                roleMap = roleMap,
+                streamNames = streamNames.ifEmpty {
+                    camCfg?.let { resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty()) }.orEmpty()
+                },
+                go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+            )
+        val names = LinkedHashSet<String>().apply {
+            add(preferred)
+            addAll(streamNames)
+            if (camCfg != null) {
+                addAll(resolveStreamNames(camera, camCfg, go2rtc?.streamKeys.orEmpty()))
+            }
+            add(camera)
+        }.filter { it.isNotBlank() }
+        val enc = { s: String -> java.net.URLEncoder.encode(s, Charsets.UTF_8.name()) }
+        val apiPort = go2rtc?.apiListenPort()
+        return buildList {
+            names.forEach { n ->
+                val e = enc(n)
+                // Primary: Frigate-authenticated proxy (JWT + TLS via OkHttp client)
+                add("$base/api/go2rtc/webrtc?src=$e")
+                // Explicit WHEP path (may 404 on some Frigate builds — tried in order)
+                add("$base/api/go2rtc/webrtc/whep?src=$e")
+            }
+            if (apiPort != null) {
+                names.forEach { n ->
+                    val e = enc(n)
+                    add("http://$host:$apiPort/api/webrtc?src=$e")
+                    add("http://$host:$apiPort/api/webrtc/whep?src=$e")
+                }
+            }
+        }.distinct()
+    }
+
     fun webrtcTalkPageUrls(camera: String, streamName: String?): List<String> {
         val base = baseUrl.trimEnd('/')
         val caps = capabilityMap[camera]

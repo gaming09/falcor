@@ -98,6 +98,7 @@ import com.falcor.viewer.R
 import com.falcor.viewer.cast.CastHelper
 import com.falcor.viewer.player.AuthenticatedClipPlayer
 import com.falcor.viewer.player.AuthenticatedLivePlayer
+import com.falcor.viewer.player.Go2rtcWebRtcPlayer
 import com.falcor.viewer.player.FrigateLiveWebView
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.foundation.layout.heightIn
@@ -201,7 +202,7 @@ fun CameraScreen(
                     }
                     IconButton(onClick = {
                         val nextMuted = !state.audioMuted
-                        // Native ExoPlayer mute is volume-driven via state; WebView needs JS on gesture.
+                        // Native WebRTC/ExoPlayer mute via state; WebView needs JS on gesture.
                         val onWebView = state.talking || state.useWebViewLive
                         if (onWebView) {
                             audioController.applyMute(nextMuted)
@@ -514,7 +515,7 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // Talk / PTT always uses WebView (mic + WebRTC).
+                    // Talk / PTT always uses WebView (mic + WebRTC backchannel).
                     state.talking && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
                             pageUrls = webUrls,
@@ -528,7 +529,17 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // Native ExoPlayer HLS first — mute via player.volume.
+                    // Native go2rtc WebRTC first — mute via AudioTrack.setEnabled/setVolume.
+                    state.isLive && state.preferNativeWebRtc && state.webrtcPostUrls.isNotEmpty() -> {
+                        Go2rtcWebRtcPlayer(
+                            webrtcPostUrls = state.webrtcPostUrls,
+                            okHttpClient = viewModel.httpClient(),
+                            mute = state.audioMuted,
+                            onAllFailed = { viewModel.onNativeWebRtcFailed() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    // Optional ExoPlayer HLS — mute via player.volume.
                     state.isLive && state.preferNativeLive && !state.mediaUrl.isNullOrBlank() -> {
                         AuthenticatedLivePlayer(
                             streamUrl = state.mediaUrl,
@@ -538,7 +549,7 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // WebView live as fallback after native HLS fails.
+                    // WebView live as late fallback (after WebRTC / HLS / VLC).
                     state.useWebViewLive && state.isLive && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
                             pageUrls = webUrls,

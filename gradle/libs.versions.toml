@@ -19,6 +19,7 @@ datastore = "1.1.1"
 mediarouter = "1.7.0"
 appcompat = "1.7.0"
 castFramework = "21.5.0"
+streamWebrtc = "1.3.9"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -51,6 +52,7 @@ androidx-datastore-preferences = { group = "androidx.datastore", name = "datasto
 androidx-mediarouter = { group = "androidx.mediarouter", name = "mediarouter", version.ref = "mediarouter" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 play-services-cast-framework = { group = "com.google.android.gms", name = "play-services-cast-framework", version.ref = "castFramework" }
+stream-webrtc-android = { group = "io.getstream", name = "stream-webrtc-android", version.ref = "streamWebrtc" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
