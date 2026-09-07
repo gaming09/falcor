@@ -97,6 +97,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.falcor.viewer.R
 import com.falcor.viewer.cast.CastHelper
 import com.falcor.viewer.player.AuthenticatedClipPlayer
+import com.falcor.viewer.player.AuthenticatedLivePlayer
 import com.falcor.viewer.player.FrigateLiveWebView
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.foundation.layout.heightIn
@@ -192,13 +193,19 @@ fun CameraScreen(
                     IconButton(onClick = { viewModel.setShowDetections(!state.showDetections) }) {
                         Icon(
                             if (state.showDetections) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                            contentDescription = stringResource(R.string.camera_toggle_detections)
+                            contentDescription = stringResource(
+                                if (state.showDetections) R.string.camera_detections_on
+                                else R.string.camera_detections_off
+                            )
                         )
                     }
                     IconButton(onClick = {
                         val nextMuted = !state.audioMuted
-                        // Same click path = user gesture → WebView unmute+play must work.
-                        audioController.applyMute(nextMuted)
+                        // Native ExoPlayer mute is volume-driven via state; WebView needs JS on gesture.
+                        val onWebView = state.talking || state.useWebViewLive
+                        if (onWebView) {
+                            audioController.applyMute(nextMuted)
+                        }
                         viewModel.setAudioMuted(nextMuted)
                     }) {
                         Icon(
@@ -306,31 +313,14 @@ fun CameraScreen(
                         )
                     }
 
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        if (state.talkSupported) {
-                            HoldTalkButton(
-                                talking = state.talking,
-                                onPress = {
-                                    val granted = ContextCompat.checkSelfPermission(
-                                        context, Manifest.permission.RECORD_AUDIO
-                                    ) == PackageManager.PERMISSION_GRANTED
-                                    if (granted) {
-                                        viewModel.setTalking(true)
-                                    } else {
-                                        pendingTalkAfterPermission = true
-                                        micPermission.launch(Manifest.permission.RECORD_AUDIO)
-                                    }
-                                },
-                                onRelease = { viewModel.setTalking(false) }
-                            )
-                        }
-                        if (state.ptzSupported) {
+                    if (state.ptzSupported) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             AssistChip(
                                 onClick = viewModel::openPtzSheet,
                                 label = { Text(stringResource(R.string.camera_ptz)) },
@@ -387,6 +377,30 @@ fun CameraScreen(
                         label = { Text(stringResource(R.string.camera_history_live)) },
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
+                    if (state.talkSupported) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            HoldTalkButton(
+                                talking = state.talking,
+                                onPress = {
+                                    val granted = ContextCompat.checkSelfPermission(
+                                        context, Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                    if (granted) {
+                                        viewModel.setTalking(true)
+                                    } else {
+                                        pendingTalkAfterPermission = true
+                                        micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                },
+                                onRelease = { viewModel.setTalking(false) }
+                            )
+                        }
+                    }
                     Spacer(Modifier.height(16.dp))
                 }
             }
@@ -448,22 +462,22 @@ private fun HoldTalkButton(
                     else -> true
                 }
             }
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 28.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Icon(
             if (talking) Icons.Default.Mic else Icons.Default.MicOff,
             contentDescription = null,
             tint = fg,
-            modifier = Modifier.size(20.dp)
+            modifier = Modifier.size(28.dp)
         )
         Text(
             stringResource(
                 if (talking) R.string.camera_talk_on else R.string.camera_talk
             ),
             color = fg,
-            style = MaterialTheme.typography.labelLarge
+            style = MaterialTheme.typography.titleMedium
         )
     }
 }
@@ -500,19 +514,41 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    (state.talking || (state.useWebViewLive && state.isLive)) && webUrls.isNotEmpty() -> {
+                    // Talk / PTT always uses WebView (mic + WebRTC).
+                    state.talking && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
                             pageUrls = webUrls,
                             bearerToken = viewModel.jwtTokenRaw(),
                             fillAspect = false,
-                            showDetections = state.showDetections && !state.talking,
-                            allowMicrophone = state.talking,
-                            muted = state.audioMuted && !state.talking,
+                            showDetections = false,
+                            allowMicrophone = true,
+                            muted = false,
                             audioController = audioController,
-                            onAllFailed = {
-                                if (state.talking) viewModel.onTalkWebRtcFailed()
-                                else viewModel.onWebViewLiveFailed()
-                            },
+                            onAllFailed = { viewModel.onTalkWebRtcFailed() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    // Native ExoPlayer HLS first — mute via player.volume.
+                    state.isLive && state.preferNativeLive && !state.mediaUrl.isNullOrBlank() -> {
+                        AuthenticatedLivePlayer(
+                            streamUrl = state.mediaUrl,
+                            okHttpClient = viewModel.httpClient(),
+                            mute = state.audioMuted,
+                            onError = { viewModel.onStreamError() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    // WebView live as fallback after native HLS fails.
+                    state.useWebViewLive && state.isLive && webUrls.isNotEmpty() -> {
+                        FrigateLiveWebView(
+                            pageUrls = webUrls,
+                            bearerToken = viewModel.jwtTokenRaw(),
+                            fillAspect = false,
+                            showDetections = state.showDetections,
+                            allowMicrophone = false,
+                            muted = state.audioMuted,
+                            audioController = audioController,
+                            onAllFailed = { viewModel.onWebViewLiveFailed() },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -608,7 +644,10 @@ private fun FullscreenLiveDialog(
             IconButton(
                 onClick = {
                     val nextMuted = !state.audioMuted
-                    audioController.applyMute(nextMuted)
+                    val onWebView = state.talking || state.useWebViewLive
+                    if (onWebView) {
+                        audioController.applyMute(nextMuted)
+                    }
                     viewModel.setAudioMuted(nextMuted)
                 },
                 modifier = Modifier

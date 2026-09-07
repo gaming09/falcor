@@ -36,8 +36,10 @@ data class CameraUiState(
     val candidateIndex: Int = 0,
     /** LibVLC exhausted — OkHttp MJPEG/snapshot (last resort). */
     val useOkHttpPreview: Boolean = false,
-    /** Prefer Frigate WebView live (MSE/WebRTC). */
-    val useWebViewLive: Boolean = true,
+    /** Prefer ExoPlayer authenticated HLS (real volume mute). */
+    val preferNativeLive: Boolean = true,
+    /** Prefer Frigate WebView live (MSE/WebRTC) — talk or native fallback. */
+    val useWebViewLive: Boolean = false,
     val livePageUrls: List<String> = emptyList(),
     /** URLs currently loaded in the main live WebView (live or talk). */
     val activeWebViewUrls: List<String> = emptyList(),
@@ -240,16 +242,21 @@ class CameraViewModel(
         val urls = repository.liveStreamUrls(cameraName, preferSub, cam.streamNames)
         val pages = repository.livePlayerPageUrls(cameraName, preferSub, cam.streamNames)
         livePagesBeforeTalk = pages
+        val hasHls = urls.any { it.contains("m3u8", ignoreCase = true) }
+        val firstHls = urls.indexOfFirst { it.contains("m3u8", ignoreCase = true) }.let { idx ->
+            if (idx >= 0) idx else 0
+        }
         _state.update {
             it.copy(
                 isLive = true,
                 talking = false,
                 authenticatedClipUrl = null,
                 candidateUrls = urls,
-                candidateIndex = 0,
-                mediaUrl = urls.firstOrNull(),
+                candidateIndex = firstHls.coerceAtMost((urls.size - 1).coerceAtLeast(0)),
+                mediaUrl = urls.getOrNull(firstHls) ?: urls.firstOrNull(),
                 useOkHttpPreview = false,
-                useWebViewLive = true,
+                preferNativeLive = hasHls,
+                useWebViewLive = !hasHls && pages.isNotEmpty(),
                 livePageUrls = pages,
                 activeWebViewUrls = pages,
                 scrubTimestamp = null,
@@ -267,9 +274,11 @@ class CameraViewModel(
             onTalkWebRtcFailed()
             return
         }
+        // WebView was fallback after native — continue to VLC / OkHttp.
         _state.update {
             it.copy(
                 useWebViewLive = false,
+                preferNativeLive = false,
                 useOkHttpPreview = false,
                 mediaUrl = it.candidateUrls.firstOrNull(),
                 candidateIndex = 0
@@ -277,9 +286,49 @@ class CameraViewModel(
         }
     }
 
+    /**
+     * Native ExoPlayer HLS error, or LibVLC candidate error.
+     * Order: next HLS → WebView live pages → remaining VLC candidates → OkHttp preview.
+     */
     fun onStreamError() {
         val s = _state.value
-        if (s.useOkHttpPreview || s.authenticatedClipUrl != null || s.useWebViewLive || s.talking) return
+        if (s.useOkHttpPreview || s.authenticatedClipUrl != null || s.talking) return
+        if (s.useWebViewLive) return
+
+        if (s.preferNativeLive && s.isLive) {
+            val nextHls = (s.candidateIndex + 1 until s.candidateUrls.size).firstOrNull { i ->
+                s.candidateUrls[i].contains("m3u8", ignoreCase = true)
+            }
+            if (nextHls != null) {
+                _state.update {
+                    it.copy(candidateIndex = nextHls, mediaUrl = s.candidateUrls[nextHls])
+                }
+                return
+            }
+            if (s.livePageUrls.isNotEmpty()) {
+                _state.update {
+                    it.copy(
+                        preferNativeLive = false,
+                        useWebViewLive = true,
+                        activeWebViewUrls = it.livePageUrls,
+                        mediaUrl = null
+                    )
+                }
+                return
+            }
+            // No WebView pages — hand off to VLC on full candidate list.
+            _state.update {
+                it.copy(
+                    preferNativeLive = false,
+                    useWebViewLive = false,
+                    candidateIndex = 0,
+                    mediaUrl = it.candidateUrls.firstOrNull()
+                )
+            }
+            return
+        }
+
+        // VLC / non-native path
         val next = s.candidateIndex + 1
         if (next < s.candidateUrls.size) {
             _state.update { it.copy(candidateIndex = next, mediaUrl = s.candidateUrls[next]) }
@@ -342,6 +391,7 @@ class CameraViewModel(
                 it.copy(
                     isLive = false,
                     useOkHttpPreview = false,
+                    preferNativeLive = false,
                     useWebViewLive = false,
                     talking = false,
                     historyProgress = progress,
@@ -512,16 +562,23 @@ class CameraViewModel(
     }
 
     private fun stopTalkInternal() {
-        val restore = livePagesBeforeTalk.ifEmpty { _state.value.livePageUrls }
+        val s = _state.value
+        if (!s.talking) return
+        val restore = livePagesBeforeTalk.ifEmpty { s.livePageUrls }
+        val resumeNativeLive = s.isLive && s.authenticatedClipUrl == null
         _state.update {
             it.copy(
                 talking = false,
                 talkWebRtcCandidates = emptyList(),
                 talkWebRtcIndex = 0,
                 activeWebViewUrls = restore,
-                useWebViewLive = restore.isNotEmpty(),
-                livePageUrls = restore
+                livePageUrls = restore,
+                useWebViewLive = false
             )
+        }
+        // Leave talk WebView; restore native-first live listen with volume mute.
+        if (resumeNativeLive) {
+            applyLiveStream()
         }
     }
 

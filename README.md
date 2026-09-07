@@ -3,19 +3,19 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.9**
+Version: **0.1.10**
 
-## Features (0.1.9)
+## Features (0.1.10)
 
-- **Working live mute/unmute** — app-bar Compose mute holds a stable `WebView` reference and runs unmute+`play()` on the same click path (user gesture). JS sets `window.__falcorMuted`, HTML5 `muted`/`volume`, and WebRTC audio track `enabled`; strips native player chrome. VLC path uses volume 0/100.
-- **Cleaner camera UI** — single app-bar mute; short PTT hint via talk button contentDescription; thinner history scrubber; detections stay in the app bar.
+- **Native live mute/unmute** — ExoPlayer (Media3 HLS) plays authenticated `/api/go2rtc/stream.m3u8?src=` with mute = `player.volume` 0f/1f. WebView kept for hold-to-talk (mic) and as live fallback. VLC/OkHttp remain last resort.
+- **Larger Hold to talk** — centered under History (not in the chip row); PTZ chip stays near stream controls. Detections eye uses on/off contentDescriptions.
 - **Cast via MediaRouter** — if no Cast session, opens the system route picker with a snackbar; prefers unauthenticated `http://{host}:5000/api/...` HLS/MJPEG when Frigate base is `:8971` (Chromecast cannot send JWT).
 - **Long-press + drag reorder** on the home camera grid — order persisted in DataStore; new cameras append at the end.
 - **Smoother camera enable/disable** — optimistic Switch, disabled while in-flight, soft merge by name (no full-grid refresh flash / scroll jump).
 - **Smarter config scan** on login / home refresh — deep rule-based analysis of `GET /api/config` (+ `GET /api/go2rtc/streams` keys): maps live / talk / PTZ / listen-audio per camera; listen audio still detected when talk is missing; prefers live stream names; heuristics documented below.
 - **Home camera enable/disable** — Frigate WebSocket `{camera}/enabled/set` with `ON`/`OFF`, HTTP PUT fallback, home keeps WS connected, snackbar on failure.
 - **Press-and-hold talk (Frigate-style)** — same live frame, WebRTC `media=video+audio+microphone`, no HTML player chrome.
-- **Live listen audio** — WebRTC/MSE with `media=video+audio`; WebView JS strips controls and autoplays.
+- **Live listen audio** — native HLS with real volume; WebView talk uses `media=video+audio+microphone`.
 - Pinch-zoom, stronger PTZ, clips, dashboards, Cast.
 
 ## Requirements
@@ -61,19 +61,20 @@ Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… list
 
 ### Live path
 
-1. WebView go2rtc/Frigate live player pages with `media=video+audio` (smooth; mute via Compose button)
-2. LibVLC on config-derived HLS/MJPEG/RTSP candidates (volume 0/100 from mute button)
-3. OkHttp MJPEG / snapshot poll (fallback)
+1. ExoPlayer authenticated HLS (`/api/go2rtc/stream.m3u8?src=`) — mute via `player.volume`
+2. WebView go2rtc/Frigate live pages (fallback; also used for talk/PTT)
+3. LibVLC on remaining HLS/MJPEG/RTSP candidates (volume 0/100)
+4. OkHttp MJPEG / snapshot poll (last resort)
 
 ### Two-way talk
 
-Press and hold **Hold to talk** on the camera screen. Falcor:
+Press and hold **Hold to talk** (large button centered under History). Falcor:
 
 1. Keeps the same black WebView frame (no ugly HTML5 player chrome).
 2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks).
 3. Grants WebView `AUDIO_CAPTURE` via `WebChromeClient.onPermissionRequest`.
 4. Injects CSS/JS to strip `controls` and autoplay.
-5. On release, restores previous live URLs with `media=video+audio` (listen only).
+5. On release, restores native HLS live listen (ExoPlayer volume mute).
 
 **Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio. If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera.
 
@@ -106,7 +107,7 @@ app/src/main/java/com/falcor/viewer/
   FalcorApp.kt, MainActivity.kt
   cast/          # CastOptionsProvider + CastHelper (single stream)
   data/          # API, models, repo, media, prefs (DataStore + secure), WebSocket
-  player/        # Live WebView, Exo clip player, OkHttp preview, LibVLC
+  player/        # Exo live HLS + clip, WebView talk, OkHttp preview, LibVLC
   ui/            # home, camera, dashboards, alerts, navigation, player chrome
 ```
 
@@ -122,13 +123,13 @@ Tap Cast on the camera screen. If no Cast session is connected, Falcor opens the
 
 ### Live audio mute
 
-The app-bar speaker button is the mute control. It updates ViewModel state **and** calls `WebViewAudioController.applyMute` on the same click so unmute+play shares the user gesture. HTML controls / muted-speaker chrome inside the WebView frame are stripped via CSS/JS.
+The app-bar speaker button drives **ExoPlayer volume** (0f/1f) on the native HLS path. When live/talk is on WebView fallback, the same click also runs `WebViewAudioController.applyMute` (user-gesture unmute+play).
 
 ## Known limits
 
 - **Dashboard Cast:** not implemented — only the focused camera stream is castable.
 - **Cast + JWT:** Default Media Receiver cannot send Frigate auth headers. Falcor rewrites `:8971` bases to `http://{host}:5000/api/...` for Cast when possible; if your Frigate API is not open on :5000, Cast may fail — use placeholders like `http://frigate.example:5000` in docs, never real LAN IPs.
-- **Mute + autoplay:** Android WebView may block unmuted autoplay until the first mute-button tap (user gesture); that tap synchronously unmutes and calls `play()`.
+- **Mute + autoplay:** Native HLS unmute is immediate via ExoPlayer volume. WebView fallback may still need a mute-button tap for unmuted autoplay.
 - **Talk:** depends on Frigate go2rtc talk/onvif/reolink audio; app grants WebView mic but cannot fix missing server talk config.
 - **Detection boxes:** depend on Frigate WS payloads; some versions expose richer data in the web UI only.
 - **WebView live:** uses go2rtc HTML players Frigate already ships; if those routes 404, Falcor falls back automatically.
