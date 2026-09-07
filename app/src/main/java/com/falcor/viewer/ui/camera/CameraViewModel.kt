@@ -12,6 +12,7 @@ import com.falcor.viewer.data.prefs.AppPreferences
 import com.falcor.viewer.data.repo.FrigateRepository
 import com.falcor.viewer.data.ws.FrigateWsClient
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
@@ -37,6 +39,8 @@ data class CameraUiState(
     /** Prefer Frigate WebView live (MSE/WebRTC). */
     val useWebViewLive: Boolean = true,
     val livePageUrls: List<String> = emptyList(),
+    /** URLs currently loaded in the main live WebView (live or talk). */
+    val activeWebViewUrls: List<String> = emptyList(),
     val authenticatedClipUrl: String? = null,
     val quality: StreamQuality = StreamQuality.SUB,
     val isLive: Boolean = true,
@@ -45,10 +49,9 @@ data class CameraUiState(
     val ptzSupportsFocus: Boolean = false,
     val ptzPresets: List<String> = emptyList(),
     val ptzSheetOpen: Boolean = false,
+    val ptzInvertPanTilt: Boolean = false,
     val talkSupported: Boolean = false,
     val talking: Boolean = false,
-    val talkWebRtcOpen: Boolean = false,
-    val talkWebRtcUrl: String? = null,
     val talkWebRtcCandidates: List<String> = emptyList(),
     val talkWebRtcIndex: Int = 0,
     val recordings: List<RecordingSegment> = emptyList(),
@@ -90,12 +93,21 @@ class CameraViewModel(
     private var ptzWsAcquired = false
     private var scrubJob: Job? = null
     private var detectionsJob: Job? = null
+    private var ptzHoldJob: Job? = null
+    private var ptzHoldFailureNotified = false
+    /** Live page URLs saved before switching WebView to talk. */
+    private var livePagesBeforeTalk: List<String> = emptyList()
 
     init {
         viewModelScope.launch {
             preferences.showDetections.collect { show ->
                 _state.update { it.copy(showDetections = show) }
                 if (show) ensureDetectionsSubscription()
+            }
+        }
+        viewModelScope.launch {
+            preferences.ptzInvertPanTilt.collect { invert ->
+                _state.update { it.copy(ptzInvertPanTilt = invert) }
             }
         }
         load()
@@ -181,6 +193,12 @@ class CameraViewModel(
         }
     }
 
+    fun setPtzInvertPanTilt(invert: Boolean) {
+        viewModelScope.launch {
+            preferences.setPtzInvertPanTilt(invert)
+        }
+    }
+
     fun setFullscreen(open: Boolean) {
         _state.update { it.copy(fullscreen = open) }
     }
@@ -191,12 +209,13 @@ class CameraViewModel(
     }
 
     fun closePtzSheet() {
+        stopPtzHold()
         _state.update { it.copy(ptzSheetOpen = false) }
     }
 
     fun setQuality(quality: StreamQuality) {
         _state.update { it.copy(quality = quality) }
-        if (_state.value.isLive) applyLiveStream()
+        if (_state.value.isLive && !_state.value.talking) applyLiveStream()
     }
 
     private fun applyLiveStream() {
@@ -204,11 +223,11 @@ class CameraViewModel(
         val preferSub = _state.value.quality == StreamQuality.SUB
         val urls = repository.liveStreamUrls(cameraName, preferSub, cam.streamNames)
         val pages = repository.livePlayerPageUrls(cameraName, preferSub, cam.streamNames)
+        livePagesBeforeTalk = pages
         _state.update {
             it.copy(
                 isLive = true,
                 talking = false,
-                talkWebRtcOpen = false,
                 authenticatedClipUrl = null,
                 candidateUrls = urls,
                 candidateIndex = 0,
@@ -216,6 +235,7 @@ class CameraViewModel(
                 useOkHttpPreview = false,
                 useWebViewLive = true,
                 livePageUrls = pages,
+                activeWebViewUrls = pages,
                 scrubTimestamp = null,
                 historyProgress = 1f,
                 detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
@@ -226,7 +246,11 @@ class CameraViewModel(
     fun onWebViewLiveFailed() {
         val s = _state.value
         if (!s.isLive || s.authenticatedClipUrl != null) return
-        // Try LibVLC candidates next
+        if (s.talking) {
+            // Advance talk candidates, then fail with snackbar.
+            onTalkWebRtcFailed()
+            return
+        }
         _state.update {
             it.copy(
                 useWebViewLive = false,
@@ -239,7 +263,7 @@ class CameraViewModel(
 
     fun onStreamError() {
         val s = _state.value
-        if (s.useOkHttpPreview || s.authenticatedClipUrl != null || s.useWebViewLive) return
+        if (s.useOkHttpPreview || s.authenticatedClipUrl != null || s.useWebViewLive || s.talking) return
         val next = s.candidateIndex + 1
         if (next < s.candidateUrls.size) {
             _state.update { it.copy(candidateIndex = next, mediaUrl = s.candidateUrls[next]) }
@@ -297,19 +321,20 @@ class CameraViewModel(
         val clip = repository.recordingPlaybackUrl(cameraName, clipStart, clipEnd)
         scrubJob?.cancel()
         scrubJob = viewModelScope.launch {
+            stopTalkInternal()
             _state.update {
                 it.copy(
                     isLive = false,
                     useOkHttpPreview = false,
                     useWebViewLive = false,
                     talking = false,
-                    talkWebRtcOpen = false,
                     historyProgress = progress,
                     scrubTimestamp = ts,
                     mediaUrl = null,
                     candidateUrls = emptyList(),
                     candidateIndex = 0,
                     authenticatedClipUrl = clip,
+                    activeWebViewUrls = emptyList(),
                     fullscreen = false
                 )
             }
@@ -343,7 +368,8 @@ class CameraViewModel(
 
     fun ptz(command: String) {
         viewModelScope.launch {
-            val result = repository.ptz(cameraName, command)
+            val mapped = mapPtzCommand(command)
+            val result = repository.ptz(cameraName, mapped)
             if (result.isFailure) {
                 val msg = result.exceptionOrNull()?.message.orEmpty()
                 if (msg.contains("WebSocket", ignoreCase = true) ||
@@ -357,16 +383,74 @@ class CameraViewModel(
         }
     }
 
+    /**
+     * Press-and-hold PTZ: send MOVE / ZOOM / FOCUS immediately, then re-send every
+     * [PTZ_HOLD_INTERVAL_MS] until [stopPtzHold]. STOP is sent once on release.
+     * Snackbars only on the first real failure of a hold (not every repeat).
+     */
+    fun startPtzHold(command: String) {
+        if (command.equals("STOP", ignoreCase = true)) {
+            stopPtzHold()
+            ptz("STOP")
+            return
+        }
+        val mapped = mapPtzCommand(command)
+        ptzHoldJob?.cancel()
+        ptzHoldFailureNotified = false
+        repository.ensurePtzWs()
+        ptzHoldJob = viewModelScope.launch {
+            while (isActive) {
+                val result = repository.ptz(cameraName, mapped)
+                if (result.isFailure && !ptzHoldFailureNotified) {
+                    ptzHoldFailureNotified = true
+                    val msg = result.exceptionOrNull()?.message.orEmpty()
+                    if (msg.contains("WebSocket", ignoreCase = true) ||
+                        repository.ptzWsState()?.value == FrigateWsClient.ConnectionState.FAILED
+                    ) {
+                        _messages.emit(CameraUserMessage.PtzWsFailed)
+                    } else {
+                        _messages.emit(CameraUserMessage.PtzCommandFailed)
+                    }
+                }
+                delay(PTZ_HOLD_INTERVAL_MS)
+            }
+        }
+    }
+
+    fun stopPtzHold() {
+        val wasHolding = ptzHoldJob?.isActive == true
+        ptzHoldJob?.cancel()
+        ptzHoldJob = null
+        if (wasHolding) {
+            viewModelScope.launch {
+                // Always send STOP once; ignore failure snackbar for stop.
+                repository.ptz(cameraName, "STOP")
+            }
+        }
+    }
+
+    private fun mapPtzCommand(command: String): String {
+        if (!_state.value.ptzInvertPanTilt) return command
+        return when (command.uppercase()) {
+            "MOVE_UP" -> "MOVE_DOWN"
+            "MOVE_DOWN" -> "MOVE_UP"
+            "MOVE_LEFT" -> "MOVE_RIGHT"
+            "MOVE_RIGHT" -> "MOVE_LEFT"
+            else -> command
+        }
+    }
+
     fun ptzPreset(presetName: String) {
         ptz("preset_$presetName")
     }
 
+    /**
+     * Press-and-hold talk: switch the **main** live WebView to go2rtc WebRTC talk URLs
+     * inline (no dialog). Release restores MSE/live URLs.
+     */
     fun setTalking(talking: Boolean) {
         if (!talking) {
-            _state.update {
-                it.copy(talking = false, talkWebRtcOpen = false, talkWebRtcUrl = null)
-            }
-            if (_state.value.isLive) applyLiveStream()
+            stopTalkInternal()
             return
         }
         val cam = _state.value.camera
@@ -375,38 +459,56 @@ class CameraViewModel(
             ?: repository.talkStreamName(cam?.streamNames.orEmpty(), cameraName)
             ?: cameraName
         val candidates = repository.webrtcTalkPageUrls(cameraName, talkName)
+        if (candidates.isEmpty()) {
+            viewModelScope.launch { _messages.emit(CameraUserMessage.TalkWebRtcFailed) }
+            return
+        }
+        if (_state.value.livePageUrls.isNotEmpty()) {
+            livePagesBeforeTalk = _state.value.livePageUrls
+        }
         _state.update {
             it.copy(
                 talking = true,
-                talkWebRtcOpen = true,
                 talkWebRtcCandidates = candidates,
                 talkWebRtcIndex = 0,
-                talkWebRtcUrl = candidates.firstOrNull()
+                useWebViewLive = true,
+                useOkHttpPreview = false,
+                authenticatedClipUrl = null,
+                isLive = true,
+                activeWebViewUrls = candidates
+            )
+        }
+    }
+
+    private fun stopTalkInternal() {
+        val restore = livePagesBeforeTalk.ifEmpty { _state.value.livePageUrls }
+        _state.update {
+            it.copy(
+                talking = false,
+                talkWebRtcCandidates = emptyList(),
+                talkWebRtcIndex = 0,
+                activeWebViewUrls = restore,
+                useWebViewLive = restore.isNotEmpty(),
+                livePageUrls = restore
             )
         }
     }
 
     fun onTalkWebRtcFailed() {
         val s = _state.value
+        if (!s.talking) return
         val next = s.talkWebRtcIndex + 1
         if (next < s.talkWebRtcCandidates.size) {
+            val remaining = s.talkWebRtcCandidates.drop(next)
             _state.update {
                 it.copy(
                     talkWebRtcIndex = next,
-                    talkWebRtcUrl = s.talkWebRtcCandidates[next]
+                    activeWebViewUrls = remaining
                 )
             }
         } else {
             viewModelScope.launch { _messages.emit(CameraUserMessage.TalkWebRtcFailed) }
-            _state.update {
-                it.copy(talkWebRtcOpen = false, talking = false, talkWebRtcUrl = null)
-            }
-        }
-    }
-
-    fun closeTalkWebRtc() {
-        _state.update {
-            it.copy(talking = false, talkWebRtcOpen = false, talkWebRtcUrl = null)
+            stopTalkInternal()
         }
     }
 
@@ -417,6 +519,7 @@ class CameraViewModel(
     override fun onCleared() {
         scrubJob?.cancel()
         detectionsJob?.cancel()
+        ptzHoldJob?.cancel()
         if (ptzWsAcquired) {
             repository.disconnectPtzWs()
             ptzWsAcquired = false
@@ -425,6 +528,9 @@ class CameraViewModel(
     }
 
     companion object {
+        /** Re-send continuous MOVE/ZOOM while held — helps sluggish Reolink/ONVIF stacks. */
+        const val PTZ_HOLD_INTERVAL_MS = 300L
+
         fun factory(repo: FrigateRepository, prefs: AppPreferences, cameraName: String) =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")

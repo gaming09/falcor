@@ -39,6 +39,11 @@ class AppPreferences(private val context: Context) {
         prefs[KEY_SHOW_DETECTIONS] ?: false
     }
 
+    /** When true, swap MOVE_UP/DOWN and MOVE_LEFT/RIGHT for Reolink/ONVIF axis quirks. */
+    val ptzInvertPanTilt: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[KEY_PTZ_INVERT] ?: false
+    }
+
     val dashboards: Flow<List<Dashboard>> = context.dataStore.data.map { prefs ->
         val raw = prefs[KEY_DASHBOARDS] ?: return@map emptyList()
         runCatching { json.decodeFromString<List<Dashboard>>(raw) }.getOrDefault(emptyList())
@@ -46,6 +51,10 @@ class AppPreferences(private val context: Context) {
 
     suspend fun setShowDetections(value: Boolean) {
         context.dataStore.edit { it[KEY_SHOW_DETECTIONS] = value }
+    }
+
+    suspend fun setPtzInvertPanTilt(value: Boolean) {
+        context.dataStore.edit { it[KEY_PTZ_INVERT] = value }
     }
 
     suspend fun saveDashboards(list: List<Dashboard>) {
@@ -56,6 +65,7 @@ class AppPreferences(private val context: Context) {
 
     companion object {
         private val KEY_SHOW_DETECTIONS = booleanPreferencesKey("show_detections")
+        private val KEY_PTZ_INVERT = booleanPreferencesKey("ptz_invert_pan_tilt")
         private val KEY_DASHBOARDS = stringPreferencesKey("dashboards_json")
     }
 }

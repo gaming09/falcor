@@ -1,17 +1,17 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.falcor.viewer.ui.camera
 
 import android.Manifest
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -60,6 +61,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -68,13 +70,16 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -92,15 +97,12 @@ import com.falcor.viewer.cast.CastHelper
 import com.falcor.viewer.player.AuthenticatedClipPlayer
 import com.falcor.viewer.player.FrigateLiveWebView
 import com.falcor.viewer.player.OkHttpLivePreview
-import com.falcor.viewer.player.TalkWebRtcDialog
 import com.falcor.viewer.player.VlcPlayer
 import com.falcor.viewer.ui.components.ErrorRetry
 import com.falcor.viewer.ui.player.DetectionOverlay
 import com.falcor.viewer.ui.player.ZoomableBox
-import java.text.DateFormat
-import java.util.Date
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
 @Composable
 fun CameraScreen(
     viewModel: CameraViewModel,
@@ -117,10 +119,14 @@ fun CameraScreen(
     val historyFailed = stringResource(R.string.media_download_failed)
     val castFailed = stringResource(R.string.cast_failed)
     val castStarted = stringResource(R.string.cast_started)
+    var pendingTalkAfterPermission by remember { mutableStateOf(false) }
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) viewModel.setTalking(true)
+        if (granted && pendingTalkAfterPermission) {
+            viewModel.setTalking(true)
+        }
+        pendingTalkAfterPermission = false
     }
 
     val configuration = LocalConfiguration.current
@@ -148,12 +154,13 @@ fun CameraScreen(
         }
     }
 
-    // Landscape: allow rotation; scale-to-fit handled in player ContentScale.Fit / object-fit contain
     DisposableEffect(Unit) {
         val prev = activity?.requestedOrientation
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
         onDispose {
             if (prev != null) activity.requestedOrientation = prev
+            viewModel.stopPtzHold()
+            viewModel.setTalking(false)
         }
     }
 
@@ -227,12 +234,27 @@ fun CameraScreen(
                         .padding(padding)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    LiveOrClipSurface(
-                        state = state,
-                        viewModel = viewModel,
-                        isLandscape = isLandscape,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    Box(Modifier.fillMaxWidth()) {
+                        LiveOrClipSurface(
+                            state = state,
+                            viewModel = viewModel,
+                            isLandscape = isLandscape,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (state.talking) {
+                            Text(
+                                stringResource(R.string.camera_talk_on),
+                                modifier = Modifier
+                                    .align(Alignment.TopCenter)
+                                    .padding(8.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(Color(0xCCB71C1C))
+                                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
 
                     Row(
                         modifier = Modifier
@@ -241,7 +263,7 @@ fun CameraScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         FilterChip(
-                            selected = state.isLive,
+                            selected = state.isLive && !state.talking,
                             onClick = viewModel::jumpToLive,
                             label = { Text(stringResource(R.string.camera_live)) }
                         )
@@ -265,31 +287,20 @@ fun CameraScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         if (state.talkSupported) {
-                            AssistChip(
-                                onClick = {
-                                    if (state.talking) {
-                                        viewModel.setTalking(false)
+                            HoldTalkButton(
+                                talking = state.talking,
+                                onPress = {
+                                    val granted = ContextCompat.checkSelfPermission(
+                                        context, Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                    if (granted) {
+                                        viewModel.setTalking(true)
                                     } else {
-                                        val granted = ContextCompat.checkSelfPermission(
-                                            context, Manifest.permission.RECORD_AUDIO
-                                        ) == PackageManager.PERMISSION_GRANTED
-                                        if (granted) viewModel.setTalking(true)
-                                        else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                                        pendingTalkAfterPermission = true
+                                        micPermission.launch(Manifest.permission.RECORD_AUDIO)
                                     }
                                 },
-                                label = {
-                                    Text(
-                                        stringResource(
-                                            if (state.talking) R.string.camera_talk_on else R.string.camera_talk
-                                        )
-                                    )
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        if (state.talking) Icons.Default.Mic else Icons.Default.MicOff,
-                                        contentDescription = null
-                                    )
-                                }
+                                onRelease = { viewModel.setTalking(false) }
                             )
                         } else {
                             Text(
@@ -327,6 +338,15 @@ fun CameraScreen(
                         )
                     }
 
+                    if (state.talkSupported) {
+                        Text(
+                            stringResource(R.string.camera_talk_hold_hint),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
                     Text(
                         stringResource(R.string.camera_history),
                         modifier = Modifier.padding(start = 16.dp, top = 16.dp),
@@ -354,7 +374,7 @@ fun CameraScreen(
                             .padding(horizontal = 16.dp)
                     )
                     val label = state.scrubTimestamp?.let {
-                        DateFormat.getDateTimeInstance().format(Date((it * 1000).toLong()))
+                        java.text.DateFormat.getDateTimeInstance().format(java.util.Date((it * 1000).toLong()))
                     } ?: stringResource(R.string.camera_live)
                     Text(
                         label,
@@ -387,7 +407,11 @@ fun CameraScreen(
                 supportsZoom = state.ptzSupportsZoom,
                 supportsFocus = state.ptzSupportsFocus,
                 presets = state.ptzPresets,
-                onCommand = viewModel::ptz,
+                invertPanTilt = state.ptzInvertPanTilt,
+                onInvertChange = viewModel::setPtzInvertPanTilt,
+                onHoldStart = viewModel::startPtzHold,
+                onHoldStop = viewModel::stopPtzHold,
+                onTapStop = { viewModel.ptz("STOP") },
                 onPreset = viewModel::ptzPreset,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -396,13 +420,50 @@ fun CameraScreen(
             )
         }
     }
+}
 
-    if (state.talkWebRtcOpen && !state.talkWebRtcUrl.isNullOrBlank()) {
-        TalkWebRtcDialog(
-            pageUrl = state.talkWebRtcUrl!!,
-            bearerToken = viewModel.jwtTokenRaw(),
-            onDismiss = viewModel::closeTalkWebRtc,
-            onLoadFailed = viewModel::onTalkWebRtcFailed
+@Composable
+private fun HoldTalkButton(
+    talking: Boolean,
+    onPress: () -> Unit,
+    onRelease: () -> Unit
+) {
+    val bg = if (talking) Color(0xFFC62828) else MaterialTheme.colorScheme.primaryContainer
+    val fg = if (talking) Color.White else MaterialTheme.colorScheme.onPrimaryContainer
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(bg)
+            .semantics { contentDescription = "Talk" }
+            .pointerInteropFilter { event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        onPress()
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        onRelease()
+                        true
+                    }
+                    else -> true
+                }
+            }
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Icon(
+            if (talking) Icons.Default.Mic else Icons.Default.MicOff,
+            contentDescription = null,
+            tint = fg,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            stringResource(
+                if (talking) R.string.camera_talk_on else R.string.camera_talk
+            ),
+            color = fg,
+            style = MaterialTheme.typography.labelLarge
         )
     }
 }
@@ -422,6 +483,7 @@ private fun LiveOrClipSurface(
             .fillMaxWidth()
             .then(if (isLandscape) Modifier.height(220.dp) else Modifier.aspectRatio(16f / 9f))
     }
+    val webUrls = state.activeWebViewUrls.ifEmpty { state.livePageUrls }
     Box(modifier = aspectMod.background(Color.Black)) {
         ZoomableBox(modifier = Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize()) {
@@ -437,13 +499,17 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    state.useWebViewLive && state.isLive && state.livePageUrls.isNotEmpty() -> {
+                    (state.talking || (state.useWebViewLive && state.isLive)) && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
-                            pageUrls = state.livePageUrls,
+                            pageUrls = webUrls,
                             bearerToken = viewModel.jwtTokenRaw(),
                             fillAspect = false,
-                            showDetections = state.showDetections,
-                            onAllFailed = viewModel::onWebViewLiveFailed,
+                            showDetections = state.showDetections && !state.talking,
+                            allowMicrophone = state.talking,
+                            onAllFailed = {
+                                if (state.talking) viewModel.onTalkWebRtcFailed()
+                                else viewModel.onWebViewLiveFailed()
+                            },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -459,13 +525,13 @@ private fun LiveOrClipSurface(
                         VlcPlayer(
                             mediaUrl = state.mediaUrl,
                             headers = viewModel.authHeaders(),
-                            mute = true,
+                            mute = false,
                             onError = { viewModel.onStreamError() },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
                 }
-                if (state.showDetections && state.isLive && state.authenticatedClipUrl == null) {
+                if (state.showDetections && state.isLive && state.authenticatedClipUrl == null && !state.talking) {
                     DetectionOverlay(boxes = state.detectionBoxes)
                 }
             }
@@ -521,6 +587,19 @@ private fun FullscreenLiveDialog(
                 fill = true,
                 modifier = Modifier.fillMaxSize()
             )
+            if (state.talking) {
+                Text(
+                    stringResource(R.string.camera_talk_on),
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(24.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color(0xCCB71C1C))
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
             IconButton(
                 onClick = { viewModel.setFullscreen(false) },
                 modifier = Modifier
@@ -543,7 +622,11 @@ private fun PtzControlSheet(
     supportsZoom: Boolean,
     supportsFocus: Boolean,
     presets: List<String>,
-    onCommand: (String) -> Unit,
+    invertPanTilt: Boolean,
+    onInvertChange: (Boolean) -> Unit,
+    onHoldStart: (String) -> Unit,
+    onHoldStop: () -> Unit,
+    onTapStop: () -> Unit,
     onPreset: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -559,43 +642,52 @@ private fun PtzControlSheet(
             stringResource(R.string.camera_ptz_hold_hint),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
+            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
         )
+
         HoldPtzButton(
             icon = Icons.Default.KeyboardArrowUp,
             contentDescription = stringResource(R.string.camera_ptz_up),
             moveCommand = "MOVE_UP",
-            onCommand = onCommand
+            onHoldStart = onHoldStart,
+            onHoldStop = onHoldStop
         )
         Row(
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(vertical = 8.dp)
+            modifier = Modifier.padding(vertical = 10.dp)
         ) {
             HoldPtzButton(
                 icon = Icons.Default.KeyboardArrowLeft,
                 contentDescription = stringResource(R.string.camera_ptz_left),
                 moveCommand = "MOVE_LEFT",
-                onCommand = onCommand
+                onHoldStart = onHoldStart,
+                onHoldStop = onHoldStop
             )
             PtzTapButton(
                 icon = Icons.Default.Stop,
                 contentDescription = stringResource(R.string.camera_ptz_stop),
-                onClick = { onCommand("STOP") }
+                onClick = {
+                    onHoldStop()
+                    onTapStop()
+                }
             )
             HoldPtzButton(
                 icon = Icons.Default.KeyboardArrowRight,
                 contentDescription = stringResource(R.string.camera_ptz_right),
                 moveCommand = "MOVE_RIGHT",
-                onCommand = onCommand
+                onHoldStart = onHoldStart,
+                onHoldStop = onHoldStop
             )
         }
         HoldPtzButton(
             icon = Icons.Default.KeyboardArrowDown,
             contentDescription = stringResource(R.string.camera_ptz_down),
             moveCommand = "MOVE_DOWN",
-            onCommand = onCommand
+            onHoldStart = onHoldStart,
+            onHoldStop = onHoldStop
         )
+
         if (supportsZoom) {
             Spacer(Modifier.height(16.dp))
             Text(stringResource(R.string.camera_ptz_zoom), style = MaterialTheme.typography.titleSmall)
@@ -607,15 +699,17 @@ private fun PtzControlSheet(
                     icon = Icons.Default.Add,
                     contentDescription = stringResource(R.string.camera_ptz_zoom_in),
                     moveCommand = "ZOOM_IN",
-                    onCommand = onCommand,
-                    size = 56.dp
+                    onHoldStart = onHoldStart,
+                    onHoldStop = onHoldStop,
+                    size = 64.dp
                 )
                 HoldPtzButton(
                     icon = Icons.Default.Remove,
                     contentDescription = stringResource(R.string.camera_ptz_zoom_out),
                     moveCommand = "ZOOM_OUT",
-                    onCommand = onCommand,
-                    size = 56.dp
+                    onHoldStart = onHoldStart,
+                    onHoldStop = onHoldStop,
+                    size = 64.dp
                 )
             }
         }
@@ -630,20 +724,45 @@ private fun PtzControlSheet(
                     icon = Icons.Default.CenterFocusStrong,
                     contentDescription = stringResource(R.string.camera_ptz_focus_in),
                     moveCommand = "FOCUS_IN",
-                    onCommand = onCommand,
-                    size = 56.dp
+                    onHoldStart = onHoldStart,
+                    onHoldStop = onHoldStop,
+                    size = 64.dp
                 )
                 HoldPtzButton(
                     icon = Icons.Default.CenterFocusWeak,
                     contentDescription = stringResource(R.string.camera_ptz_focus_out),
                     moveCommand = "FOCUS_OUT",
-                    onCommand = onCommand,
-                    size = 56.dp
+                    onHoldStart = onHoldStart,
+                    onHoldStop = onHoldStop,
+                    size = 64.dp
                 )
             }
         }
+
+        Spacer(Modifier.height(12.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                Text(
+                    stringResource(R.string.camera_ptz_invert),
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Text(
+                    stringResource(R.string.camera_ptz_invert_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(checked = invertPanTilt, onCheckedChange = onInvertChange)
+        }
+
         if (presets.isNotEmpty()) {
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
             Text(
                 stringResource(R.string.camera_ptz_presets),
                 style = MaterialTheme.typography.titleSmall,
@@ -663,26 +782,51 @@ private fun PtzControlSheet(
     }
 }
 
+/**
+ * Press-and-hold PTZ control. Uses [pointerInteropFilter] so ModalBottomSheet cannot
+ * steal DOWN/LEFT gestures; consumes the full press and drives ViewModel hold/repeat.
+ */
 @Composable
 private fun HoldPtzButton(
     icon: ImageVector,
     contentDescription: String,
     moveCommand: String,
-    onCommand: (String) -> Unit,
-    size: androidx.compose.ui.unit.Dp = 64.dp
+    onHoldStart: (String) -> Unit,
+    onHoldStop: () -> Unit,
+    size: androidx.compose.ui.unit.Dp = 72.dp
 ) {
+    var pressed by remember { mutableStateOf(false) }
+    val bg = if (pressed) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.primaryContainer
+    }
+    val tint = if (pressed) {
+        MaterialTheme.colorScheme.onPrimary
+    } else {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    }
     Box(
         modifier = Modifier
             .size(size)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer)
+            .background(bg)
             .semantics { this.contentDescription = contentDescription }
-            .pointerInput(moveCommand) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    onCommand(moveCommand)
-                    waitForUpOrCancellation()
-                    onCommand("STOP")
+            .pointerInteropFilter { event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        pressed = true
+                        onHoldStart(moveCommand)
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        pressed = false
+                        onHoldStop()
+                        true
+                    }
+                    // Consume move so the bottom sheet cannot hijack vertical/horizontal drags.
+                    MotionEvent.ACTION_MOVE -> true
+                    else -> true
                 }
             },
         contentAlignment = Alignment.Center
@@ -690,7 +834,7 @@ private fun HoldPtzButton(
         Icon(
             icon,
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+            tint = tint,
             modifier = Modifier.size(size * 0.5f)
         )
     }
@@ -701,7 +845,7 @@ private fun PtzTapButton(
     icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
-    size: androidx.compose.ui.unit.Dp = 64.dp
+    size: androidx.compose.ui.unit.Dp = 72.dp
 ) {
     IconButton(
         onClick = onClick,

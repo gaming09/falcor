@@ -2,8 +2,10 @@ package com.falcor.viewer.player
 
 import android.annotation.SuppressLint
 import android.graphics.Color
+import android.media.AudioManager
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -29,6 +31,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
 import com.falcor.viewer.R
@@ -36,7 +39,10 @@ import java.net.URI
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Authenticated WebView hosting Frigate/go2rtc MSE or WebRTC live player pages.
+ * Authenticated WebView hosting Frigate/go2rtc MSE or WebRTC live / talk player pages.
+ *
+ * - Autoplay + unmuted HTML5 video (live audio)
+ * - Grants CAMERA / AUDIO_CAPTURE for getUserMedia (two-way talk)
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -46,6 +52,8 @@ fun FrigateLiveWebView(
     modifier: Modifier = Modifier,
     fillAspect: Boolean = true,
     showDetections: Boolean = true,
+    /** When true, WebView may request mic/camera for go2rtc talk. */
+    allowMicrophone: Boolean = false,
     onPlaying: (() -> Unit)? = null,
     onAllFailed: (() -> Unit)? = null
 ) {
@@ -55,15 +63,32 @@ fun FrigateLiveWebView(
     val onPlayingState by rememberUpdatedState(onPlaying)
     val onAllFailedState by rememberUpdatedState(onAllFailed)
     val showDetState by rememberUpdatedState(showDetections)
+    val allowMicState by rememberUpdatedState(allowMicrophone)
     val urlsState by rememberUpdatedState(pageUrls)
     val attempt = remember { AtomicInteger(0) }
     val pageUrl = pageUrls.getOrNull(candidateIndex)
+    val context = LocalContext.current
 
     LaunchedEffect(pageUrls) {
         candidateIndex = 0
         exhausted = false
         loading = true
         attempt.set(0)
+    }
+
+    // Request audio focus so live audio is audible over other apps when possible.
+    DisposableEffect(Unit) {
+        val am = context.getSystemService(AudioManager::class.java)
+        val result = am?.requestAudioFocus(
+            { },
+            AudioManager.STREAM_MUSIC,
+            AudioManager.AUDIOFOCUS_GAIN
+        )
+        onDispose {
+            if (result != null) {
+                am?.abandonAudioFocus { }
+            }
+        }
     }
 
     val boxMod = if (fillAspect) {
@@ -81,6 +106,7 @@ fun FrigateLiveWebView(
                 pageUrl = pageUrl,
                 bearerToken = bearerToken,
                 showDetections = showDetState,
+                allowMicrophone = allowMicState,
                 onPlaying = { loading = false; onPlayingState?.invoke() },
                 onMainFrameError = {
                     val next = candidateIndex + 1
@@ -107,11 +133,33 @@ fun FrigateLiveWebView(
             )
         }
     }
-
-    DisposableEffect(Unit) {
-        onDispose { }
-    }
 }
+
+private const val UNMUTE_JS = """
+(function(){
+  function unmuteAll(){
+    try {
+      document.querySelectorAll('video,audio').forEach(function(v){
+        try {
+          v.muted = false;
+          v.defaultMuted = false;
+          v.volume = 1.0;
+          if (v.paused) {
+            var p = v.play();
+            if (p && p.catch) p.catch(function(){});
+          }
+        } catch(e) {}
+      });
+      var btn = document.querySelector('button[aria-label*="play" i],button.play,button[title*="play" i]');
+      if (btn) try { btn.click(); } catch(e) {}
+    } catch(e) {}
+  }
+  unmuteAll();
+  if (!window.__falcorUnmuteTimer) {
+    window.__falcorUnmuteTimer = setInterval(unmuteAll, 1500);
+  }
+})();
+"""
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -119,6 +167,7 @@ private fun keyAndroidView(
     pageUrl: String,
     bearerToken: String?,
     showDetections: Boolean,
+    allowMicrophone: Boolean,
     onPlaying: () -> Unit,
     onMainFrameError: () -> Unit,
     onStarted: () -> Unit
@@ -126,6 +175,7 @@ private fun keyAndroidView(
     val onPlayingState by rememberUpdatedState(onPlaying)
     val onErrorState by rememberUpdatedState(onMainFrameError)
     val showDet by rememberUpdatedState(showDetections)
+    val allowMic by rememberUpdatedState(allowMicrophone)
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -143,6 +193,9 @@ private fun keyAndroidView(
                 settings.cacheMode = WebSettings.LOAD_DEFAULT
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
+                // Allow WebRTC / getUserMedia
+                settings.allowFileAccess = true
+                settings.allowContentAccess = true
                 CookieManager.getInstance().setAcceptCookie(true)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
@@ -152,7 +205,23 @@ private fun keyAndroidView(
                     injectAuthCookie(pageUrl, "frigate_token", token)
                 }
 
-                webChromeClient = WebChromeClient()
+                webChromeClient = object : WebChromeClient() {
+                    override fun onPermissionRequest(request: PermissionRequest?) {
+                        if (request == null) return
+                        // Grant audio/video capture for go2rtc talk + live WebRTC.
+                        val wanted = request.resources
+                        val grant = wanted.filter {
+                            it == PermissionRequest.RESOURCE_AUDIO_CAPTURE ||
+                                it == PermissionRequest.RESOURCE_VIDEO_CAPTURE ||
+                                it == PermissionRequest.RESOURCE_PROTECTED_MEDIA_ID
+                        }.toTypedArray()
+                        if (grant.isNotEmpty()) {
+                            request.grant(grant)
+                        } else {
+                            request.grant(wanted)
+                        }
+                    }
+                }
                 webViewClient = object : WebViewClient() {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                         onStarted()
@@ -167,6 +236,8 @@ private fun keyAndroidView(
                             "(function(){var s=document.createElement('style');s.innerHTML='body{margin:0;background:#000;overflow:hidden;}video{width:100%!important;height:100%!important;object-fit:contain!important;}';document.head.appendChild(s);$hideBoxes})();",
                             null
                         )
+                        // Unmute + play HTML5 media (live audio).
+                        view?.evaluateJavascript(UNMUTE_JS, null)
                     }
 
                     override fun onReceivedError(
@@ -194,6 +265,9 @@ private fun keyAndroidView(
             }
         },
         update = { webView ->
+            // Keep mic permission grant path current (chrome client already grants).
+            @Suppress("UNUSED_EXPRESSION")
+            allowMic
             if (webView.url != pageUrl) {
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")
                     ?.removePrefix("bearer ")?.trim().orEmpty()
@@ -201,6 +275,9 @@ private fun keyAndroidView(
                 val headers = mutableMapOf<String, String>()
                 if (token.isNotEmpty()) headers["Authorization"] = "Bearer $token"
                 webView.loadUrl(pageUrl, headers)
+            } else {
+                // Re-assert unmute when recomposing while same URL (e.g. talk hold).
+                webView.evaluateJavascript(UNMUTE_JS, null)
             }
         }
     )
