@@ -6,16 +6,12 @@ import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -31,16 +27,17 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.delay
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Authenticated live stream via ExoPlayer (Media3) + OkHttp DataSource (JWT/TLS).
  *
- * - HLS (`*.m3u8`) → [HlsMediaSource]
- * - MP4 (`stream.mp4` / progressive) → [ProgressiveMediaSource]
- * Mute = [ExoPlayer.setVolume] 0f/1f; [PlayerView] shows vanilla Media3 controls
- * (play / mute / fullscreen) — same UX family as clip playback.
+ * Demoted for live open path (WebView-primary). Kept for optional explicit
+ * [preferNativeLive] fallback. PlayerView alone — no Compose "Connecting" overlay.
+ * Ready timeout (~9s) calls [onError] if playback never reaches STATE_READY.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -52,8 +49,8 @@ fun AuthenticatedLivePlayer(
     onError: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
-    var buffering by remember { mutableStateOf(false) }
     val onErrorState by rememberUpdatedState(onError)
+    val reachedReady = remember { AtomicBoolean(false) }
 
     val player = remember {
         ExoPlayer.Builder(context).build().apply {
@@ -66,15 +63,12 @@ fun AuthenticatedLivePlayer(
     DisposableEffect(Unit) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                buffering = playbackState == Player.STATE_BUFFERING ||
-                    playbackState == Player.STATE_IDLE
                 if (playbackState == Player.STATE_READY) {
-                    buffering = false
+                    reachedReady.set(true)
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                buffering = false
                 onErrorState?.invoke()
             }
         }
@@ -90,12 +84,11 @@ fun AuthenticatedLivePlayer(
     }
 
     LaunchedEffect(streamUrl, okHttpClient) {
+        reachedReady.set(false)
         if (streamUrl.isNullOrBlank()) {
             player.stop()
-            buffering = false
             return@LaunchedEffect
         }
-        buffering = true
         val factory = OkHttpDataSource.Factory(
             okHttpClient.newBuilder()
                 .readTimeout(30, TimeUnit.SECONDS)
@@ -112,6 +105,12 @@ fun AuthenticatedLivePlayer(
         player.prepare()
         player.playWhenReady = true
         player.volume = if (mute) 0f else 1f
+
+        // Ready timeout so Exo never sits forever on a black bar / buffering UI.
+        delay(9_000L)
+        if (!reachedReady.get()) {
+            onErrorState?.invoke()
+        }
     }
 
     Box(
@@ -142,9 +141,6 @@ fun AuthenticatedLivePlayer(
                 view.useController = true
             }
         )
-        if (buffering) {
-            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-        }
     }
 }
 

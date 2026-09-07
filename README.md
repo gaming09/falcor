@@ -3,12 +3,13 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.15**
+Version: **0.1.16**
 
-## Features (0.1.15)
+## Features (0.1.16)
 
-- **ExoPlayer-primary live (vanilla Media3)** — same stack as history clips: authenticated OkHttp DataSource + `HlsMediaSource` / `ProgressiveMediaSource` for go2rtc `stream.m3u8` / `stream.mp4`. `PlayerView` with `useController = true` (play / mute / fullscreen). Mute = `player.volume` 0/1 (default unmuted). Optional AppBar volume icon toggles the same flag.
-- **No WebView-primary live** — WebView is **talk/PTT only** (minimal chrome); optional last-resort after Exo → VLC. No HTML5 mute-bar / JS mute fights for listen audio.
+- **WebView-primary live (restored)** — single go2rtc embed (`webrtc.html` / mse); one surface only. No ExoPlayer on the open-camera path, no stacked Connecting + second feed.
+- **HTML5 mute bar** — `video.controls = true` kept visible; AppBar mute only toggles soft JS volume / `audioMuted` (never reloads URLs). No SPA `#cameras`, no DOM mute-button clicking.
+- **Fallback** — if WebView exhausts all page URLs → OkHttp MJPEG/snapshot (replaces WebView). ExoPlayer demoted / unused on live open.
 - **Version in UI** — home app bar and connect screen show `Falcor {VERSION_NAME}` from `BuildConfig`.
 - **Detections** — eye toggles Compose `DetectionOverlay` only (detect w/h letterbox from `/api/config`); never reloads live URLs.
 - **Larger Hold to talk** — centered under History (not in the chip row); PTZ chip stays near stream controls.
@@ -17,7 +18,7 @@ Version: **0.1.15**
 - **Smoother camera enable/disable** — optimistic Switch, disabled while in-flight, soft merge by name (no full-grid refresh flash / scroll jump).
 - **Smarter config scan** on login / home refresh — deep rule-based analysis of `GET /api/config` (+ `GET /api/go2rtc/streams` keys): maps live / talk / PTZ / listen-audio per camera; listen audio still detected when talk is missing; prefers live stream names; heuristics documented below.
 - **Home camera enable/disable** — Frigate WebSocket `{camera}/enabled/set` with `ON`/`OFF`, HTTP PUT fallback, home keeps WS connected, snackbar on failure.
-- **Press-and-hold talk (Frigate-style)** — WebView WebRTC `media=video+audio+microphone`; release restores Exo live.
+- **Press-and-hold talk (Frigate-style)** — WebView WebRTC `media=video+audio+microphone`; release restores WebView live.
 - Pinch-zoom, stronger PTZ, clips, dashboards, Cast.
 
 ## Requirements
@@ -63,13 +64,12 @@ Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… list
 
 ### Live path
 
-1. **ExoPlayer (primary)** — authenticated go2rtc MP4 (`/api/go2rtc/stream.mp4?src=`) then HLS (`/api/go2rtc/stream.m3u8?src=`), plus direct go2rtc `stream.mp4` / `stream.m3u8` when API listen is published. Media3 `PlayerView` controller + `player.volume` mute.
-2. LibVLC on remaining MJPEG/RTSP candidates
-3. WebView go2rtc/Frigate embeds — **last resort** after Exo/VLC (never Frigate `#cameras/` SPA)
-4. Optional native WebRTC (`POST /api/go2rtc/webrtc`) — demoted
-5. OkHttp MJPEG / snapshot poll (final fallback)
+1. **WebView go2rtc/Frigate embeds (primary)** — `webrtc.html` / mse pages (never Frigate `#cameras/` SPA). Single surface; HTML5 `video.controls` kept on for mute.
+2. OkHttp MJPEG / snapshot poll when WebView exhausts all page URLs (replaces WebView)
+3. LibVLC on remaining candidates only if neither WebView nor OkHttp is active
+4. ExoPlayer / native WebRTC — **demoted**; not started on open-camera
 
-**Talk/PTT** uses a minimal WebView with `media=video+audio+microphone`. History clips use ExoPlayer as before.
+**Talk/PTT** uses the same WebView stack with `media=video+audio+microphone`. History clips still use ExoPlayer.
 
 **WebRTC caveats (native fallback):** Frigate must proxy go2rtc WebRTC (`/api/go2rtc/webrtc`). Media path needs go2rtc WebRTC listen (typically UDP/TCP **8555**) and LAN candidates in go2rtc config for non-localhost viewers.
 
@@ -80,8 +80,8 @@ Press and hold **Hold to talk** (large button centered under History). Falcor:
 1. Switches the live surface to a minimal talk WebView.
 2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks).
 3. Grants WebView `AUDIO_CAPTURE` via `WebChromeClient.onPermissionRequest`.
-4. Injects light CSS for page chrome cleanup + autoplay (no HTML5 mute-bar forcing).
-5. On release, restores ExoPlayer-primary live (Media3 mute / AppBar volume).
+4. Injects CSS that keeps HTML5 `video.controls` + autoplay (no DOM mute-button clicking).
+5. On release, restores WebView-primary live.
 
 **Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio. If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera.
 
@@ -114,7 +114,7 @@ app/src/main/java/com/falcor/viewer/
   FalcorApp.kt, MainActivity.kt
   cast/          # CastOptionsProvider + CastHelper (single stream)
   data/          # API, models, repo, media, prefs (DataStore + secure), WebSocket
-  player/        # Native WebRTC live, Exo HLS + clip, WebView talk, OkHttp preview, LibVLC
+  player/        # WebView live/talk, Exo clip (+ demoted live), OkHttp preview, LibVLC, native WebRTC
   ui/            # home, camera, dashboards, alerts, navigation, player chrome
 ```
 
@@ -130,7 +130,7 @@ Tap Cast on the camera screen. If no Cast session is connected, Falcor opens the
 
 ### Live audio mute
 
-Mute/unmute is **only** via the native **HTML5 video control bar** on WebView live embeds (always kept visible). Compose app-bar and overlay mute buttons were removed in 0.1.14.
+Prefer the native **HTML5 video control bar** on WebView live embeds (`video.controls = true`). Optional AppBar volume icon only toggles `audioMuted` + soft JS volume — it never changes stream URLs.
 
 ## Known limits
 

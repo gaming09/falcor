@@ -100,6 +100,7 @@ import com.falcor.viewer.player.AuthenticatedClipPlayer
 import com.falcor.viewer.player.AuthenticatedLivePlayer
 import com.falcor.viewer.player.Go2rtcWebRtcPlayer
 import com.falcor.viewer.player.FrigateLiveWebView
+import com.falcor.viewer.player.WebViewAudioController
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.foundation.layout.heightIn
 import com.falcor.viewer.cast.CastOutcome
@@ -119,6 +120,7 @@ fun CameraScreen(
     val context = LocalContext.current
     val activity = context as? Activity
     val snackbarHostState = remember { SnackbarHostState() }
+    val audioController = remember { WebViewAudioController() }
     val ptzWsError = stringResource(R.string.camera_ptz_ws_error)
     val ptzCmdError = stringResource(R.string.camera_ptz_command_error)
     val talkWebRtcError = stringResource(R.string.camera_talk_webrtc_failed)
@@ -189,7 +191,14 @@ fun CameraScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = viewModel::toggleAudioMuted) {
+                    IconButton(onClick = {
+                        val nextMuted = !state.audioMuted
+                        // Soft JS volume only — never reload stream URLs.
+                        if (state.talking || state.useWebViewLive) {
+                            audioController.applyMute(nextMuted)
+                        }
+                        viewModel.setAudioMuted(nextMuted)
+                    }) {
                         Icon(
                             if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
                             contentDescription = stringResource(
@@ -263,6 +272,7 @@ fun CameraScreen(
                             state = state,
                             viewModel = viewModel,
                             isLandscape = isLandscape,
+                            audioController = audioController,
                             modifier = Modifier.fillMaxWidth()
                         )
                         if (state.talking) {
@@ -398,7 +408,7 @@ fun CameraScreen(
     }
 
     if (state.fullscreen) {
-        FullscreenLiveDialog(state = state, viewModel = viewModel)
+        FullscreenLiveDialog(state = state, viewModel = viewModel, audioController = audioController)
     }
 
     if (state.ptzSheetOpen && state.ptzSupported) {
@@ -478,7 +488,8 @@ private fun LiveOrClipSurface(
     viewModel: CameraViewModel,
     isLandscape: Boolean,
     modifier: Modifier = Modifier,
-    fill: Boolean = false
+    fill: Boolean = false,
+    audioController: WebViewAudioController? = null
 ) {
     val aspectMod = if (fill) {
         modifier.fillMaxSize()
@@ -491,6 +502,7 @@ private fun LiveOrClipSurface(
     Box(modifier = aspectMod.background(Color.Black)) {
         ZoomableBox(modifier = Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize()) {
+                // Mutually exclusive: only one live surface at a time.
                 when {
                     !state.authenticatedClipUrl.isNullOrBlank() -> {
                         AuthenticatedClipPlayer(
@@ -503,7 +515,7 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // Talk / PTT only: WebView (mic + WebRTC backchannel).
+                    // Talk / PTT: WebView (mic + WebRTC backchannel).
                     state.talking && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
                             pageUrls = webUrls,
@@ -512,11 +524,26 @@ private fun LiveOrClipSurface(
                             showDetections = false,
                             allowMicrophone = true,
                             muted = false,
+                            audioController = audioController,
                             onAllFailed = { viewModel.onTalkWebRtcFailed() },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // Primary live: ExoPlayer HLS/MP4 with Media3 PlayerView controls (incl. mute).
+                    // Primary live: single go2rtc/Frigate WebView embed (webrtc.html / mse).
+                    state.useWebViewLive && state.isLive && webUrls.isNotEmpty() -> {
+                        FrigateLiveWebView(
+                            pageUrls = webUrls,
+                            bearerToken = viewModel.jwtTokenRaw(),
+                            fillAspect = false,
+                            showDetections = false,
+                            allowMicrophone = false,
+                            muted = state.audioMuted,
+                            audioController = audioController,
+                            onAllFailed = { viewModel.onWebViewLiveFailed() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    // Optional demoted Exo — only if explicitly preferNativeLive (not open path).
                     state.isLive && state.preferNativeLive && !state.mediaUrl.isNullOrBlank() -> {
                         AuthenticatedLivePlayer(
                             streamUrl = state.mediaUrl,
@@ -533,19 +560,6 @@ private fun LiveOrClipSurface(
                             okHttpClient = viewModel.httpClient(),
                             mute = state.audioMuted,
                             onAllFailed = { viewModel.onNativeWebRtcFailed() },
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    // Last-resort live after Exo/VLC: WebView embeds.
-                    state.useWebViewLive && state.isLive && webUrls.isNotEmpty() -> {
-                        FrigateLiveWebView(
-                            pageUrls = webUrls,
-                            bearerToken = viewModel.jwtTokenRaw(),
-                            fillAspect = false,
-                            showDetections = false,
-                            allowMicrophone = false,
-                            muted = state.audioMuted,
-                            onAllFailed = { viewModel.onWebViewLiveFailed() },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -592,7 +606,8 @@ private fun LiveOrClipSurface(
 @Composable
 private fun FullscreenLiveDialog(
     state: CameraUiState,
-    viewModel: CameraViewModel
+    viewModel: CameraViewModel,
+    audioController: WebViewAudioController
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -635,6 +650,7 @@ private fun FullscreenLiveDialog(
                 viewModel = viewModel,
                 isLandscape = true,
                 fill = true,
+                audioController = audioController,
                 modifier = Modifier.fillMaxSize()
             )
             if (state.talking) {
