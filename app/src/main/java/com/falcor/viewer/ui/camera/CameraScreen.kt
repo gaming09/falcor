@@ -129,6 +129,7 @@ fun CameraScreen(
     val castStarted = stringResource(R.string.cast_started)
     val castNoDevice = stringResource(R.string.cast_no_device)
     val castAuthWarning = stringResource(R.string.cast_auth_url_warning)
+    val noListenStream = stringResource(R.string.camera_no_listen_stream)
     var pendingTalkAfterPermission by remember { mutableStateOf(false) }
     val micDeniedMsg = stringResource(R.string.camera_permission_mic)
     val micPermission = rememberLauncherForActivityResult(
@@ -169,6 +170,7 @@ fun CameraScreen(
                 CameraUserMessage.CastStarted -> snackbarHostState.showSnackbar(castStarted)
                 CameraUserMessage.CastNoDevice -> snackbarHostState.showSnackbar(castNoDevice)
                 CameraUserMessage.CastAuthUrlWarning -> snackbarHostState.showSnackbar(castAuthWarning)
+                CameraUserMessage.NoListenCapableStream -> snackbarHostState.showSnackbar(noListenStream)
             }
         }
     }

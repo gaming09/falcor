@@ -52,6 +52,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Grants CAMERA / AUDIO_CAPTURE for getUserMedia (two-way talk)
  * - Minimal chrome JS: black background + object-fit only (does not strip controls or force mute)
  * - 0.1.20-debug: FalcorAudioProbe snackbar + Log.i (probe-only; no product audio changes)
+ * - 0.1.21-debug: keep probe; live src selection prefers *_webrtc (see FrigateRepository)
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable

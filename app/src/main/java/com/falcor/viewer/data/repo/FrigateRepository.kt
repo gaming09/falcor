@@ -11,7 +11,10 @@ import com.falcor.viewer.data.model.FrigateEvent
 import com.falcor.viewer.data.model.LoginRequest
 import com.falcor.viewer.data.model.PtzInfo
 import com.falcor.viewer.data.model.RecordingSegment
+import com.falcor.viewer.data.model.cameraHasListenCapableStream
 import com.falcor.viewer.data.model.deriveCameraCapabilities
+import com.falcor.viewer.data.model.isListenCapableStream
+import com.falcor.viewer.data.model.resolvePreferredLiveStreamName
 import com.falcor.viewer.data.model.resolveStreamNames
 import com.falcor.viewer.data.model.toUi
 import com.falcor.viewer.data.prefs.AppPreferences
@@ -528,6 +531,10 @@ class FrigateRepository(
         }.distinct()
     }
 
+    /**
+     * Resolve live `src` with listen-capable preference + [preferSub] every call.
+     * Delegates to [resolvePreferredLiveStreamName] (WebRTC Audio / *_webrtc first).
+     */
     private fun resolvePreferredStreamName(
         camera: String,
         preferSub: Boolean,
@@ -535,6 +542,19 @@ class FrigateRepository(
         streamNames: List<String>,
         go2rtcKeys: Set<String>
     ): String {
+        val config = cachedConfig
+        val camCfg = config?.cameras?.get(camera)
+        if (camCfg != null) {
+            return resolvePreferredLiveStreamName(
+                cameraName = camera,
+                camera = camCfg,
+                streamNames = streamNames,
+                go2rtcKeys = go2rtcKeys,
+                preferSub = preferSub,
+                go2rtc = config.go2rtc
+            )
+        }
+        // Config miss — lightweight fallback (still honors preferSub; no stale caps).
         fun pickFromRoles(sub: Boolean): String? {
             val entry = roleMap.entries.firstOrNull { (role, _) ->
                 if (sub) role.contains("sub", true)
@@ -542,14 +562,18 @@ class FrigateRepository(
             }
             return entry?.value?.trim()?.takeIf { it.isNotEmpty() }
         }
+        val listenRole = roleMap.entries.firstOrNull { (role, value) ->
+            isListenCapableStream(role, value.trim(), go2rtc = null)
+        }?.value?.trim()
+        if (!listenRole.isNullOrBlank() && (go2rtcKeys.isEmpty() || listenRole in go2rtcKeys)) {
+            return listenRole
+        }
         val fromRole = if (preferSub) {
             pickFromRoles(sub = true) ?: pickFromRoles(sub = false)
         } else {
-            pickFromRoles(sub = false) ?: roleMap.values.firstOrNull()?.trim()
+            pickFromRoles(sub = false) ?: pickFromRoles(sub = true) ?: roleMap.values.firstOrNull()?.trim()
         }
-        if (!fromRole.isNullOrBlank()) {
-            if (go2rtcKeys.isEmpty() || fromRole in go2rtcKeys) return fromRole
-        }
+        if (!fromRole.isNullOrBlank() && (go2rtcKeys.isEmpty() || fromRole in go2rtcKeys)) return fromRole
         val fromNames = when {
             preferSub && streamNames.any { it.contains("sub", true) } ->
                 streamNames.first { it.contains("sub", true) }
@@ -561,6 +585,14 @@ class FrigateRepository(
         if (!fromNames.isNullOrBlank()) return fromNames
         if (camera in go2rtcKeys) return camera
         return camera
+    }
+
+    /** True when Frigate/go2rtc exposes a listen-capable stream for [camera]. */
+    fun hasListenCapableLiveSrc(camera: String): Boolean {
+        val config = cachedConfig ?: return false
+        val cam = config.cameras[camera] ?: return false
+        val names = resolveStreamNames(camera, cam, config.go2rtc?.streamKeys.orEmpty())
+        return cameraHasListenCapableStream(camera, cam, names, config.go2rtc)
     }
 
     fun talkStreamName(streamNames: List<String>, camera: String): String? {
@@ -601,19 +633,39 @@ class FrigateRepository(
         val config = cachedConfig
         val go2rtc = config?.go2rtc
         val camCfg = config?.cameras?.get(camera)
-        val caps = capabilityMap[camera]
         val roleMap = camCfg?.live?.streams.orEmpty()
-        val preferred = caps?.liveStreamName?.takeIf { it.isNotBlank() }
-            ?: resolvePreferredStreamName(
-                camera = camera,
-                preferSub = preferSub,
-                roleMap = roleMap,
-                streamNames = streamNames.ifEmpty {
-                    camCfg?.let { resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty()) }.orEmpty()
-                },
-                go2rtcKeys = go2rtc?.streamKeys.orEmpty()
-            )
-        val names = linkedSetOf(preferred, camera).filter { it.isNotBlank() }
+        // Always resolve fresh with preferSub + listen preference — never lock to stale caps.liveStreamName.
+        val preferred = resolvePreferredStreamName(
+            camera = camera,
+            preferSub = preferSub,
+            roleMap = roleMap,
+            streamNames = streamNames.ifEmpty {
+                camCfg?.let { resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty()) }.orEmpty()
+            },
+            go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+        )
+        // Secondary: classic main/sub (no listen boost) so quality chips still vary candidates
+        // when a shared WebRTC Audio role is preferred for both Main and Sub.
+        val qualityOnly = run {
+            fun pick(sub: Boolean): String? {
+                val entry = roleMap.entries.firstOrNull { (role, _) ->
+                    if (sub) role.contains("sub", true)
+                    else role.contains("main", true) || role.equals("stream", true)
+                }
+                return entry?.value?.trim()?.takeIf { it.isNotEmpty() }
+            }
+            if (preferSub) pick(true) ?: pick(false) else pick(false) ?: pick(true)
+        }
+        Log.d(
+            TAG,
+            "livePlayerPageUrls camera=$camera preferSub=$preferSub src=$preferred " +
+                "qualitySrc=$qualityOnly listenCapable=${hasListenCapableLiveSrc(camera)}"
+        )
+        val names = linkedSetOf<String>().apply {
+            add(preferred)
+            qualityOnly?.takeIf { it.isNotBlank() }?.let { add(it) }
+            add(camera)
+        }.filter { it.isNotBlank() }
         val enc = { s: String -> java.net.URLEncoder.encode(s, Charsets.UTF_8.name()) }
         // Request unmuted listen audio (no mic) — matches Frigate web Live player.
         // Never embed Frigate SPA (#cameras/…) — that leaks history chrome into the WebView.
@@ -679,18 +731,17 @@ class FrigateRepository(
         val config = cachedConfig
         val go2rtc = config?.go2rtc
         val camCfg = config?.cameras?.get(camera)
-        val caps = capabilityMap[camera]
         val roleMap = camCfg?.live?.streams.orEmpty()
-        val preferred = caps?.liveStreamName?.takeIf { it.isNotBlank() }
-            ?: resolvePreferredStreamName(
-                camera = camera,
-                preferSub = preferSub,
-                roleMap = roleMap,
-                streamNames = streamNames.ifEmpty {
-                    camCfg?.let { resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty()) }.orEmpty()
-                },
-                go2rtcKeys = go2rtc?.streamKeys.orEmpty()
-            )
+        // Fresh resolve each call (preferSub + listen) — do not use stale caps.liveStreamName.
+        val preferred = resolvePreferredStreamName(
+            camera = camera,
+            preferSub = preferSub,
+            roleMap = roleMap,
+            streamNames = streamNames.ifEmpty {
+                camCfg?.let { resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty()) }.orEmpty()
+            },
+            go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+        )
         val names = LinkedHashSet<String>().apply {
             add(preferred)
             addAll(streamNames)

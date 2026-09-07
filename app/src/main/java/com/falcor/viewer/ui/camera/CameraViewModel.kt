@@ -89,6 +89,8 @@ sealed class CameraUserMessage {
     data object CastStarted : CameraUserMessage()
     data object CastNoDevice : CameraUserMessage()
     data object CastAuthUrlWarning : CameraUserMessage()
+    /** Config has no listen-capable go2rtc/live.streams src for this camera (video-only). */
+    data object NoListenCapableStream : CameraUserMessage()
 }
 
 class CameraViewModel(
@@ -110,6 +112,8 @@ class CameraViewModel(
     private var ptzHoldFailureNotified = false
     /** Live page URLs saved before switching WebView to talk. */
     private var livePagesBeforeTalk: List<String> = emptyList()
+    /** Emit [CameraUserMessage.NoListenCapableStream] at most once per camera screen. */
+    private var noListenNotified = false
 
     init {
         viewModelScope.launch {
@@ -265,6 +269,19 @@ class CameraViewModel(
         )
         livePagesBeforeTalk = pages
         val useWeb = pages.isNotEmpty()
+        val hasListenSrc = repository.hasListenCapableLiveSrc(cameraName)
+        if (!hasListenSrc) {
+            android.util.Log.i(
+                "CameraViewModel",
+                "no listen-capable stream for $cameraName — using video src (preferSub=$preferSub)"
+            )
+            if (!noListenNotified) {
+                noListenNotified = true
+                viewModelScope.launch {
+                    _messages.emit(CameraUserMessage.NoListenCapableStream)
+                }
+            }
+        }
         _state.update {
             it.copy(
                 isLive = true,

@@ -59,6 +59,7 @@
     <string name="camera_talk">Hold to talk</string>
     <string name="camera_talk_on">Talking…</string>
     <string name="camera_talk_hold_hint">Hold mic to talk; release to stop.</string>
+    <string name="camera_no_listen_stream">No listen-capable stream for this camera — video only</string>
     <string name="camera_talk_unavailable">Two-way audio not detected in Frigate/go2rtc config for this camera</string>
     <string name="camera_talk_webrtc_title">Two-way talk</string>
     <string name="camera_talk_webrtc_hint">Press and hold mic on the camera view. Uses Frigate go2rtc WebRTC with media=video+audio+microphone and WebView mic permission.</string>
