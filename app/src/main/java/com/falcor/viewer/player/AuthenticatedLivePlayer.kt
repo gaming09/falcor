@@ -29,13 +29,18 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
 /**
- * Authenticated live HLS via ExoPlayer (Media3) + OkHttp DataSource (JWT/TLS).
- * Mute is [ExoPlayer.setVolume] 0f/1f — reliable compared to WebView autoplay policies.
+ * Authenticated live stream via ExoPlayer (Media3) + OkHttp DataSource (JWT/TLS).
+ *
+ * - HLS (`*.m3u8`) → [HlsMediaSource]
+ * - MP4 (`stream.mp4` / progressive) → [ProgressiveMediaSource]
+ * Mute = [ExoPlayer.setVolume] 0f/1f; [PlayerView] shows vanilla Media3 controls
+ * (play / mute / fullscreen) — same UX family as clip playback.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -97,8 +102,12 @@ fun AuthenticatedLivePlayer(
                 .build()
         )
         val dataSourceFactory = DefaultDataSource.Factory(context, factory)
-        val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
-            .createMediaSource(MediaItem.fromUri(streamUrl))
+        val mediaItem = MediaItem.fromUri(streamUrl)
+        val mediaSource = if (isHlsUrl(streamUrl)) {
+            HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+        } else {
+            ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+        }
         player.setMediaSource(mediaSource)
         player.prepare()
         player.playWhenReady = true
@@ -119,17 +128,33 @@ fun AuthenticatedLivePlayer(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
-                    useController = false
+                    useController = true
+                    controllerShowTimeoutMs = 3_000
+                    controllerHideOnTouch = true
                     this.player = player
-                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
                     setBackgroundColor(android.graphics.Color.BLACK)
                 }
             },
-            update = { it.player = player }
+            update = { view ->
+                view.player = player
+                view.useController = true
+            }
         )
         if (buffering) {
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
         }
     }
+}
+
+internal fun isHlsUrl(url: String): Boolean =
+    url.contains("m3u8", ignoreCase = true)
+
+/** ExoPlayer-friendly live candidates (HLS or go2rtc/Frigate MP4). */
+internal fun isExoLiveCandidate(url: String): Boolean {
+    val u = url.lowercase()
+    return u.contains("m3u8") ||
+        u.contains("stream.mp4") ||
+        (u.contains("go2rtc") && u.contains(".mp4"))
 }

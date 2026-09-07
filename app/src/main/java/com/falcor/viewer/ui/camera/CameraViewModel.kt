@@ -11,6 +11,7 @@ import com.falcor.viewer.data.model.toUi
 import com.falcor.viewer.data.prefs.AppPreferences
 import com.falcor.viewer.data.repo.FrigateRepository
 import com.falcor.viewer.data.ws.FrigateWsClient
+import com.falcor.viewer.player.isExoLiveCandidate
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -36,13 +37,13 @@ data class CameraUiState(
     val candidateIndex: Int = 0,
     /** LibVLC exhausted — OkHttp MJPEG/snapshot (last resort). */
     val useOkHttpPreview: Boolean = false,
-    /** Native go2rtc WebRTC — demoted fallback after WebView (AudioTrack mute). */
+    /** Native go2rtc WebRTC — demoted fallback (after Exo/VLC). */
     val preferNativeWebRtc: Boolean = false,
     /** WHEP POST URLs for native WebRTC live. */
     val webrtcPostUrls: List<String> = emptyList(),
-    /** ExoPlayer authenticated HLS — demoted fallback after WebView. */
+    /** Primary live path: ExoPlayer authenticated HLS/MP4 (Media3 PlayerView). */
     val preferNativeLive: Boolean = false,
-    /** Primary live path: Frigate/go2rtc HTML players in WebView. */
+    /** Last-resort live path: Frigate/go2rtc HTML players in WebView (talk uses this too). */
     val useWebViewLive: Boolean = false,
     val livePageUrls: List<String> = emptyList(),
     /** URLs currently loaded in the main live WebView (live or talk). */
@@ -68,7 +69,7 @@ data class CameraUiState(
     val scrubTimestamp: Double? = null,
     val fullscreen: Boolean = false,
     val showDetections: Boolean = false,
-    /** Legacy field; Compose mute chrome removed in 0.1.14 — HTML5 bar owns mute. */
+    /** ExoPlayer volume mute for live (PlayerView also has vanilla mute). Default unmuted. */
     val audioMuted: Boolean = false,
     val detectionBoxes: List<DetectionBox> = emptyList(),
     val error: Boolean = false
@@ -226,7 +227,6 @@ class CameraViewModel(
         _state.update { it.copy(fullscreen = open) }
     }
 
-    /** No-op retained for binary compatibility; mute is HTML5-only in 0.1.14. */
     fun setAudioMuted(muted: Boolean) {
         _state.update { it.copy(audioMuted = muted) }
     }
@@ -255,34 +255,34 @@ class CameraViewModel(
         val preferSub = _state.value.quality == StreamQuality.SUB
         val webrtcUrls = repository.webrtcLiveUrls(cameraName, preferSub, cam.streamNames)
         val urls = repository.liveStreamUrls(cameraName, preferSub, cam.streamNames)
-        // Always go2rtc/Frigate embed players — never Frigate SPA (#cameras/).
+        // Keep go2rtc/Frigate embed pages for talk + last-resort fallback — never SPA.
         val pages = repository.livePlayerPageUrls(
             cameraName,
             preferSub,
             cam.streamNames
         )
         livePagesBeforeTalk = pages
-        val firstHls = urls.indexOfFirst { it.contains("m3u8", ignoreCase = true) }.let { idx ->
-            if (idx >= 0) idx else 0
+        val firstExo = urls.indexOfFirst { isExoLiveCandidate(it) }.let { idx ->
+            if (idx >= 0) idx else -1
         }
-        val useWeb = pages.isNotEmpty()
+        val hasExo = firstExo >= 0
+        val mediaIdx = if (hasExo) firstExo else 0
         _state.update {
             it.copy(
                 isLive = true,
                 talking = false,
                 authenticatedClipUrl = null,
                 candidateUrls = urls,
-                candidateIndex = firstHls.coerceAtMost((urls.size - 1).coerceAtLeast(0)),
-                // Keep HLS/VLC candidates ready for WebView-exhausted fallback.
-                mediaUrl = if (useWeb) null else (urls.getOrNull(firstHls) ?: urls.firstOrNull()),
+                candidateIndex = mediaIdx.coerceAtMost((urls.size - 1).coerceAtLeast(0)),
+                mediaUrl = urls.getOrNull(mediaIdx) ?: urls.firstOrNull(),
                 useOkHttpPreview = false,
-                // WebView-primary live; native WebRTC/HLS demoted until WebView fails.
                 preferNativeWebRtc = false,
                 webrtcPostUrls = webrtcUrls,
-                preferNativeLive = false,
-                useWebViewLive = useWeb,
+                // ExoPlayer-primary when HLS/MP4 candidates exist; WebView only for talk.
+                preferNativeLive = hasExo,
+                useWebViewLive = false,
                 livePageUrls = pages,
-                activeWebViewUrls = pages,
+                activeWebViewUrls = emptyList(),
                 scrubTimestamp = null,
                 historyProgress = 1f,
                 // Keep existing boxes when detections eye is on (Compose overlay).
@@ -299,45 +299,16 @@ class CameraViewModel(
             onTalkWebRtcFailed()
             return
         }
-        // WebView exhausted — optional HLS → VLC → OkHttp MJPEG.
-        val hasHls = s.candidateUrls.any { it.contains("m3u8", ignoreCase = true) }
-        if (hasHls) {
-            val firstHls = s.candidateUrls.indexOfFirst { it.contains("m3u8", ignoreCase = true) }
-                .coerceAtLeast(0)
-            _state.update {
-                it.copy(
-                    useWebViewLive = false,
-                    preferNativeWebRtc = false,
-                    preferNativeLive = true,
-                    useOkHttpPreview = false,
-                    candidateIndex = firstHls,
-                    mediaUrl = s.candidateUrls.getOrNull(firstHls) ?: s.candidateUrls.firstOrNull(),
-                    detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
-                )
-            }
-            return
-        }
-        if (s.candidateUrls.isNotEmpty()) {
-            _state.update {
-                it.copy(
-                    useWebViewLive = false,
-                    preferNativeWebRtc = false,
-                    preferNativeLive = false,
-                    useOkHttpPreview = false,
-                    candidateIndex = 0,
-                    mediaUrl = s.candidateUrls.firstOrNull(),
-                    detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
-                )
-            }
-            return
-        }
+        // WebView was last-resort live — drop to OkHttp MJPEG/snapshot.
         _state.update {
             it.copy(
                 useWebViewLive = false,
                 preferNativeWebRtc = false,
                 preferNativeLive = false,
                 useOkHttpPreview = true,
-                mediaUrl = null
+                mediaUrl = null,
+                activeWebViewUrls = emptyList(),
+                detectionBoxes = if (it.showDetections) it.detectionBoxes else emptyList()
             )
         }
     }
@@ -380,8 +351,8 @@ class CameraViewModel(
     }
 
     /**
-     * Native ExoPlayer HLS error, or LibVLC candidate error.
-     * Order after WebRTC: next HLS → remaining VLC candidates → WebView pages → OkHttp.
+     * Native ExoPlayer HLS/MP4 error, or LibVLC candidate error.
+     * Order: next Exo candidate → VLC remaining → WebView pages (last resort) → OkHttp.
      */
     fun onStreamError() {
         val s = _state.value
@@ -389,16 +360,16 @@ class CameraViewModel(
         if (s.useWebViewLive || s.preferNativeWebRtc) return
 
         if (s.preferNativeLive && s.isLive) {
-            val nextHls = (s.candidateIndex + 1 until s.candidateUrls.size).firstOrNull { i ->
-                s.candidateUrls[i].contains("m3u8", ignoreCase = true)
+            val nextExo = (s.candidateIndex + 1 until s.candidateUrls.size).firstOrNull { i ->
+                isExoLiveCandidate(s.candidateUrls[i])
             }
-            if (nextHls != null) {
+            if (nextExo != null) {
                 _state.update {
-                    it.copy(candidateIndex = nextHls, mediaUrl = s.candidateUrls[nextHls])
+                    it.copy(candidateIndex = nextExo, mediaUrl = s.candidateUrls[nextExo])
                 }
                 return
             }
-            // HLS exhausted — hand off to VLC on full candidate list.
+            // Exo exhausted — hand off to VLC on full candidate list.
             _state.update {
                 it.copy(
                     preferNativeLive = false,
@@ -410,10 +381,20 @@ class CameraViewModel(
             return
         }
 
-        // VLC / non-native path (WebView already primary — do not loop back to it)
+        // VLC path — advance candidates, then last-resort WebView, then OkHttp.
         val next = s.candidateIndex + 1
         if (next < s.candidateUrls.size) {
             _state.update { it.copy(candidateIndex = next, mediaUrl = s.candidateUrls[next]) }
+        } else if (s.isLive && s.livePageUrls.isNotEmpty()) {
+            _state.update {
+                it.copy(
+                    preferNativeLive = false,
+                    useWebViewLive = true,
+                    useOkHttpPreview = false,
+                    mediaUrl = null,
+                    activeWebViewUrls = it.livePageUrls
+                )
+            }
         } else if (s.isLive) {
             _state.update { it.copy(useOkHttpPreview = true, mediaUrl = null) }
         }
@@ -604,8 +585,8 @@ class CameraViewModel(
     }
 
     /**
-     * Press-and-hold talk: switch the **main** live WebView to go2rtc WebRTC talk URLs
-     * inline (no dialog). Release restores MSE/live URLs.
+     * Press-and-hold talk: switch to go2rtc WebRTC talk URLs in WebView (mic).
+     * Release restores ExoPlayer-primary live via [applyLiveStream].
      */
     fun setTalking(talking: Boolean) {
         if (!talking) {
@@ -656,12 +637,12 @@ class CameraViewModel(
                 talking = false,
                 talkWebRtcCandidates = emptyList(),
                 talkWebRtcIndex = 0,
-                activeWebViewUrls = restore,
+                activeWebViewUrls = emptyList(),
                 livePageUrls = restore,
-                useWebViewLive = restore.isNotEmpty()
+                useWebViewLive = false
             )
         }
-        // Leave talk WebView; restore WebView-primary live listen.
+        // Leave talk WebView; restore ExoPlayer-primary live.
         if (resumeLive) {
             applyLiveStream()
         }

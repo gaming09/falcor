@@ -49,6 +49,8 @@ import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -187,6 +189,15 @@ fun CameraScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = viewModel::toggleAudioMuted) {
+                        Icon(
+                            if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                            contentDescription = stringResource(
+                                if (state.audioMuted) R.string.camera_unmute
+                                else R.string.camera_mute
+                            )
+                        )
+                    }
                     IconButton(onClick = { viewModel.setShowDetections(!state.showDetections) }) {
                         Icon(
                             if (state.showDetections) Icons.Default.Visibility else Icons.Default.VisibilityOff,
@@ -485,14 +496,14 @@ private fun LiveOrClipSurface(
                         AuthenticatedClipPlayer(
                             remoteUrl = state.authenticatedClipUrl,
                             okHttpClient = viewModel.httpClient(),
-                            mute = false,
+                            mute = state.audioMuted,
                             downloadFileName = "${state.cameraName}_${state.scrubTimestamp?.toLong() ?: 0}.mp4",
                             onError = viewModel::onHistoryPlayError,
                             onDownloadResult = viewModel::onDownloadResult,
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // Talk / PTT always uses WebView (mic + WebRTC backchannel).
+                    // Talk / PTT only: WebView (mic + WebRTC backchannel).
                     state.talking && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
                             pageUrls = webUrls,
@@ -505,7 +516,27 @@ private fun LiveOrClipSurface(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                    // Primary live: Frigate/go2rtc HTML players (WebView) — video+audio.
+                    // Primary live: ExoPlayer HLS/MP4 with Media3 PlayerView controls (incl. mute).
+                    state.isLive && state.preferNativeLive && !state.mediaUrl.isNullOrBlank() -> {
+                        AuthenticatedLivePlayer(
+                            streamUrl = state.mediaUrl,
+                            okHttpClient = viewModel.httpClient(),
+                            mute = state.audioMuted,
+                            onError = { viewModel.onStreamError() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    // Optional demoted native WebRTC.
+                    state.isLive && state.preferNativeWebRtc && state.webrtcPostUrls.isNotEmpty() -> {
+                        Go2rtcWebRtcPlayer(
+                            webrtcPostUrls = state.webrtcPostUrls,
+                            okHttpClient = viewModel.httpClient(),
+                            mute = state.audioMuted,
+                            onAllFailed = { viewModel.onNativeWebRtcFailed() },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    // Last-resort live after Exo/VLC: WebView embeds.
                     state.useWebViewLive && state.isLive && webUrls.isNotEmpty() -> {
                         FrigateLiveWebView(
                             pageUrls = webUrls,
@@ -513,28 +544,8 @@ private fun LiveOrClipSurface(
                             fillAspect = false,
                             showDetections = false,
                             allowMicrophone = false,
-                            muted = false,
+                            muted = state.audioMuted,
                             onAllFailed = { viewModel.onWebViewLiveFailed() },
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    // Demoted: native go2rtc WebRTC after WebView exhausts.
-                    state.isLive && state.preferNativeWebRtc && state.webrtcPostUrls.isNotEmpty() -> {
-                        Go2rtcWebRtcPlayer(
-                            webrtcPostUrls = state.webrtcPostUrls,
-                            okHttpClient = viewModel.httpClient(),
-                            mute = false,
-                            onAllFailed = { viewModel.onNativeWebRtcFailed() },
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                    // Demoted: ExoPlayer HLS after WebView.
-                    state.isLive && state.preferNativeLive && !state.mediaUrl.isNullOrBlank() -> {
-                        AuthenticatedLivePlayer(
-                            streamUrl = state.mediaUrl,
-                            okHttpClient = viewModel.httpClient(),
-                            mute = false,
-                            onError = { viewModel.onStreamError() },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -550,7 +561,7 @@ private fun LiveOrClipSurface(
                         VlcPlayer(
                             mediaUrl = state.mediaUrl,
                             headers = viewModel.authHeaders(),
-                            mute = false,
+                            mute = state.audioMuted,
                             onError = { viewModel.onStreamError() },
                             modifier = Modifier.fillMaxSize()
                         )

@@ -467,11 +467,12 @@ class FrigateRepository(
      * RTSP / :API ports when [Go2RtcConfig] exposes a non-loopback listen address —
      * never invent closed Docker ports.
      *
-     * Order:
-     * 1. go2rtc HLS via Frigate API (`/api/go2rtc/stream.m3u8?src=`)
-     * 2. Frigate continuous MJPEG (`/api/{camera}`)
-     * 3. Optional go2rtc HTTP API listen from config
-     * 4. Optional RTSP listen from config (last)
+     * Order (ExoPlayer-primary live uses MP4 + HLS first):
+     * 1. go2rtc MP4 via Frigate API (`/api/go2rtc/stream.mp4?src=`) — often carries A/V
+     * 2. go2rtc HLS via Frigate API (`/api/go2rtc/stream.m3u8?src=`)
+     * 3. Frigate continuous MJPEG (`/api/{camera}`)
+     * 4. Optional go2rtc HTTP API listen from config (mp4 + m3u8)
+     * 5. Optional RTSP listen from config (last / VLC)
      */
     fun liveStreamUrls(camera: String, preferSub: Boolean, streamNames: List<String>): List<String> {
         val host = runCatching { URI(baseUrl).host }.getOrNull() ?: return emptyList()
@@ -501,20 +502,24 @@ class FrigateRepository(
         val rtspPort = go2rtc?.rtspListenPort()
 
         return buildList {
-            // 1. HLS through Frigate (same host/port/JWT as thumbnails)
+            // 1. Progressive MP4 through Frigate (JWT) — prefer for ExoPlayer A/V
+            names.forEach { n ->
+                add("$base/api/go2rtc/stream.mp4?src=$n")
+            }
+            // 2. HLS through Frigate (same host/port/JWT as thumbnails)
             names.forEach { n ->
                 add("$base/api/go2rtc/stream.m3u8?src=$n")
             }
-            // 2. Continuous MJPEG — always available via Frigate API
+            // 3. Continuous MJPEG — always available via Frigate API
             add("$base/api/$camera")
-            // 3. Direct go2rtc HTTP only when config publishes a reachable API listen
+            // 4. Direct go2rtc HTTP only when config publishes a reachable API listen
             if (apiPort != null) {
                 names.forEach { n ->
-                    add("http://$host:$apiPort/api/stream.m3u8?src=$n&mp4")
                     add("http://$host:$apiPort/api/stream.mp4?src=$n")
+                    add("http://$host:$apiPort/api/stream.m3u8?src=$n&mp4")
                 }
             }
-            // 4. RTSP only when config publishes a reachable RTSP listen
+            // 5. RTSP only when config publishes a reachable RTSP listen
             if (rtspPort != null) {
                 names.forEach { n ->
                     add("rtsp://$host:$rtspPort/$n")

@@ -3,22 +3,21 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.14**
+Version: **0.1.15**
 
-## Features (0.1.14)
+## Features (0.1.15)
 
-- **Static HTML5 video mute** — live WebView keeps the native bottom control bar always visible after load; CSS/JS no longer strips `::-webkit-media-controls` or forces `controls=false`. Mute/unmute is **only** via that HTML5 bar (app-bar / Falcor overlay mute chrome removed).
+- **ExoPlayer-primary live (vanilla Media3)** — same stack as history clips: authenticated OkHttp DataSource + `HlsMediaSource` / `ProgressiveMediaSource` for go2rtc `stream.m3u8` / `stream.mp4`. `PlayerView` with `useController = true` (play / mute / fullscreen). Mute = `player.volume` 0/1 (default unmuted). Optional AppBar volume icon toggles the same flag.
+- **No WebView-primary live** — WebView is **talk/PTT only** (minimal chrome); optional last-resort after Exo → VLC. No HTML5 mute-bar / JS mute fights for listen audio.
 - **Version in UI** — home app bar and connect screen show `Falcor {VERSION_NAME}` from `BuildConfig`.
-- **WebView-primary live** — go2rtc/Frigate HTML embeds only (`live/webrtc/webrtc.html`, `api/go2rtc/webrtc.html` / `stream.html`, `mse.html` with `media=video+audio`). Native WebRTC / ExoPlayer HLS / VLC demoted after WebView exhausts; OkHttp MJPEG last.
-- **Detections** — eye toggles Compose `DetectionOverlay` only (detect w/h letterbox from `/api/config`); never swaps the live embed URL to Frigate SPA.
-- **Larger Hold to talk** — centered under History (not in the chip row); PTZ chip stays near stream controls. Detections eye uses on/off contentDescriptions.
+- **Detections** — eye toggles Compose `DetectionOverlay` only (detect w/h letterbox from `/api/config`); never reloads live URLs.
+- **Larger Hold to talk** — centered under History (not in the chip row); PTZ chip stays near stream controls.
 - **Cast via MediaRouter** — if no Cast session, opens the system route picker with a snackbar; prefers unauthenticated `http://{host}:5000/api/...` HLS/MJPEG when Frigate base is `:8971` (Chromecast cannot send JWT).
 - **Long-press + drag reorder** on the home camera grid — order persisted in DataStore; new cameras append at the end.
 - **Smoother camera enable/disable** — optimistic Switch, disabled while in-flight, soft merge by name (no full-grid refresh flash / scroll jump).
 - **Smarter config scan** on login / home refresh — deep rule-based analysis of `GET /api/config` (+ `GET /api/go2rtc/streams` keys): maps live / talk / PTZ / listen-audio per camera; listen audio still detected when talk is missing; prefers live stream names; heuristics documented below.
 - **Home camera enable/disable** — Frigate WebSocket `{camera}/enabled/set` with `ON`/`OFF`, HTTP PUT fallback, home keeps WS connected, snackbar on failure.
-- **Press-and-hold talk (Frigate-style)** — same live frame, WebRTC `media=video+audio+microphone`.
-- **Live listen audio** — HTML5 control-bar mute on WebView live; native fallbacks play unmuted.
+- **Press-and-hold talk (Frigate-style)** — WebView WebRTC `media=video+audio+microphone`; release restores Exo live.
 - Pinch-zoom, stronger PTZ, clips, dashboards, Cast.
 
 ## Requirements
@@ -64,13 +63,13 @@ Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… list
 
 ### Live path
 
-1. **WebView** — go2rtc/Frigate embed pages only (`live/webrtc/webrtc.html?media=video+audio`, go2rtc `webrtc.html` / `stream.html`, MSE). Never Frigate `#cameras/` SPA. Auth cookie/JWT injected. Native HTML5 `controls` stay on; mute via that bar.
-2. ExoPlayer authenticated HLS (`/api/go2rtc/stream.m3u8?src=`) — after WebView exhausts; mute via `player.volume`
-3. LibVLC on remaining HLS/MJPEG/RTSP candidates (volume 0/100)
-4. Optional native WebRTC (`POST /api/go2rtc/webrtc`) — demoted; kept for experiments / fallback flags
-5. OkHttp MJPEG / snapshot poll (last resort)
+1. **ExoPlayer (primary)** — authenticated go2rtc MP4 (`/api/go2rtc/stream.mp4?src=`) then HLS (`/api/go2rtc/stream.m3u8?src=`), plus direct go2rtc `stream.mp4` / `stream.m3u8` when API listen is published. Media3 `PlayerView` controller + `player.volume` mute.
+2. LibVLC on remaining MJPEG/RTSP candidates
+3. WebView go2rtc/Frigate embeds — **last resort** after Exo/VLC (never Frigate `#cameras/` SPA)
+4. Optional native WebRTC (`POST /api/go2rtc/webrtc`) — demoted
+5. OkHttp MJPEG / snapshot poll (final fallback)
 
-**Talk/PTT** still uses WebView with `media=video+audio+microphone`. History clips still use ExoPlayer/LibVLC as before.
+**Talk/PTT** uses a minimal WebView with `media=video+audio+microphone`. History clips use ExoPlayer as before.
 
 **WebRTC caveats (native fallback):** Frigate must proxy go2rtc WebRTC (`/api/go2rtc/webrtc`). Media path needs go2rtc WebRTC listen (typically UDP/TCP **8555**) and LAN candidates in go2rtc config for non-localhost viewers.
 
@@ -78,11 +77,11 @@ Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… list
 
 Press and hold **Hold to talk** (large button centered under History). Falcor:
 
-1. Keeps the same black WebView frame (native HTML5 controls stay available).
+1. Switches the live surface to a minimal talk WebView.
 2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks).
 3. Grants WebView `AUDIO_CAPTURE` via `WebChromeClient.onPermissionRequest`.
-4. Injects CSS/JS for page chrome cleanup + autoplay; re-asserts `video.controls = true`.
-5. On release, restores WebView-primary live listen (HTML5 mute remains the mute UX).
+4. Injects light CSS for page chrome cleanup + autoplay (no HTML5 mute-bar forcing).
+5. On release, restores ExoPlayer-primary live (Media3 mute / AppBar volume).
 
 **Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio. If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera.
 

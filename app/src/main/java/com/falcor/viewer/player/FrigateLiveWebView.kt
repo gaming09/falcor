@@ -39,46 +39,8 @@ import java.net.URI
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Holds a stable [WebView] reference so mute/unmute can run
- * [WebView.evaluateJavascript] synchronously on the mute-button click path
- * (user gesture → unmuted autoplay).
- */
-class WebViewAudioController {
-    @Volatile
-    var webView: WebView? = null
-        private set
-
-    fun attach(view: WebView) {
-        webView = view
-    }
-
-    fun detach(view: WebView) {
-        if (webView === view) webView = null
-    }
-
-    /**
-     * Apply mute/unmute + play immediately (call from button onClick / user gesture).
-     * Only touches video/audio elements + AudioContext — never clicks page mute UI
-     * (those clicks can flip go2rtc/Frigate stream controls).
-     */
-    fun applyMute(muted: Boolean) {
-        val wv = webView ?: return
-        val js = applyMuteJs(muted)
-        // Click path is on the UI thread — evaluate now so unmuted play shares the gesture.
-        try {
-            wv.evaluateJavascript(js, null)
-        } catch (_: Throwable) {
-            wv.post { runCatching { wv.evaluateJavascript(js, null) } }
-        }
-    }
-}
-
-/**
- * Authenticated WebView hosting Frigate/go2rtc MSE or WebRTC live / talk player pages.
- *
- * - Autoplay + unmuted HTML5 video (live audio)
- * - Grants CAMERA / AUDIO_CAPTURE for getUserMedia (two-way talk)
- * - Compose mute drives JS via [WebViewAudioController] (user-gesture safe)
+ * Minimal authenticated WebView for **talk/PTT** (and rare last-resort live fallback).
+ * Live listen audio is handled by ExoPlayer — no HTML5 mute-bar / JS mute fights here.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -90,9 +52,8 @@ fun FrigateLiveWebView(
     showDetections: Boolean = true,
     /** When true, WebView may request mic/camera for go2rtc talk. */
     allowMicrophone: Boolean = false,
-    /** Compose-driven mute — injects JS on <video>/<audio>; HTML5 controls stay visible. */
+    /** Kept for API compatibility; talk path stays unmuted. */
     muted: Boolean = false,
-    audioController: WebViewAudioController? = null,
     onPlaying: (() -> Unit)? = null,
     onAllFailed: (() -> Unit)? = null
 ) {
@@ -103,12 +64,12 @@ fun FrigateLiveWebView(
     val onAllFailedState by rememberUpdatedState(onAllFailed)
     val showDetState by rememberUpdatedState(showDetections)
     val allowMicState by rememberUpdatedState(allowMicrophone)
-    val mutedState by rememberUpdatedState(muted)
     val urlsState by rememberUpdatedState(pageUrls)
-    val controllerState by rememberUpdatedState(audioController)
     val attempt = remember { AtomicInteger(0) }
     val pageUrl = pageUrls.getOrNull(candidateIndex)
     val context = LocalContext.current
+    @Suppress("UNUSED_VARIABLE")
+    val mutedIgnored = muted
 
     LaunchedEffect(pageUrls) {
         candidateIndex = 0
@@ -117,12 +78,6 @@ fun FrigateLiveWebView(
         attempt.set(0)
     }
 
-    // Keep controller mute in sync when StateFlow changes (e.g. fullscreen / talk).
-    LaunchedEffect(muted) {
-        controllerState?.applyMute(muted)
-    }
-
-    // Request audio focus so live audio is audible over other apps when possible.
     DisposableEffect(Unit) {
         val am = context.getSystemService(AudioManager::class.java)
         val result = am?.requestAudioFocus(
@@ -148,13 +103,11 @@ fun FrigateLiveWebView(
         contentAlignment = Alignment.Center
     ) {
         if (pageUrl != null && !exhausted) {
-            keyAndroidView(
+            TalkWebView(
                 pageUrl = pageUrl,
                 bearerToken = bearerToken,
                 showDetections = showDetState,
                 allowMicrophone = allowMicState,
-                muted = mutedState,
-                audioController = controllerState,
                 onPlaying = { loading = false; onPlayingState?.invoke() },
                 onMainFrameError = {
                     val next = candidateIndex + 1
@@ -183,112 +136,39 @@ fun FrigateLiveWebView(
     }
 }
 
-/** Hide go2rtc/Frigate page chrome only — keep native HTML5 video controls visible + tappable. */
-private const val PLAYER_CHROME_JS = """
+/** Minimal page chrome cleanup for talk embeds — no HTML5 control-bar forcing. */
+private const val TALK_CHROME_JS = """
 (function(){
-  function stylePlayer(){
-    try {
-      if (!document.getElementById('falcor-player-css')) {
-        var s = document.createElement('style');
-        s.id = 'falcor-player-css';
-        s.textContent = [
-          'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;}',
-          'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;position:fixed!important;inset:0!important;z-index:1!important;pointer-events:auto!important;}',
-          'video::-webkit-media-controls,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-panel{display:flex!important;opacity:1!important;visibility:visible!important;pointer-events:auto!important;}',
-          'video::-webkit-media-controls-mute-button,video::-webkit-media-controls-volume-slider,video::-webkit-media-controls-timeline,video::-webkit-media-controls-current-time-display,video::-webkit-media-controls-time-remaining-display,video::-webkit-media-controls-play-button{pointer-events:auto!important;opacity:1!important;visibility:visible!important;}',
-          'audio{display:none!important;}',
-          'nav,aside,header,footer,[class*=sidebar],[class*=history],[class*=History],[class*=timeline],[class*=Timeline],[class*=review],[id*=sidebar]{display:none!important;visibility:hidden!important;width:0!important;height:0!important;}'
-        ].join('');
-        (document.head || document.documentElement).appendChild(s);
-      }
-      var muted = !!window.__falcorMuted;
-      document.querySelectorAll('video,audio').forEach(function(v){
-        try {
-          // Keep native HTML5 control bar (mute works there); re-assert so pages cannot strip it.
-          v.controls = true;
-          v.setAttribute('controls','');
-          v.setAttribute('playsinline','');
-          v.setAttribute('webkit-playsinline','');
-          v.muted = muted;
-          v.defaultMuted = muted;
-          v.volume = muted ? 0.0 : 1.0;
-          if (v.srcObject && v.srcObject.getAudioTracks) {
-            v.srcObject.getAudioTracks().forEach(function(t){ t.enabled = !muted; });
-          }
-          var p = v.play();
-          if (p && p.catch) p.catch(function(){});
-        } catch(e) {}
-      });
-    } catch(e) {}
-  }
-  stylePlayer();
-  if (!window.__falcorPlayerTimer) {
-    window.__falcorPlayerTimer = setInterval(stylePlayer, 800);
-  }
-  document.addEventListener('DOMContentLoaded', stylePlayer);
-})();
-"""
-
-private fun muteFlagJs(muted: Boolean): String =
-    "window.__falcorMuted = ${if (muted) "true" else "false"};"
-
-internal fun applyMuteJs(muted: Boolean): String = """
-(function(){
-  var wantMuted = ${if (muted) "true" else "false"};
-  window.__falcorMuted = wantMuted;
-  function applyMedia(v){
-    try {
-      // Never strip HTML5 controls — native mute bar is the reliable unmute path.
-      v.controls = true;
-      v.setAttribute('controls','');
-      v.setAttribute('playsinline','');
-      v.setAttribute('webkit-playsinline','');
-      v.muted = wantMuted;
-      v.defaultMuted = wantMuted;
-      try { v.volume = wantMuted ? 0.0 : 1.0; } catch(e) {}
-      if (v.srcObject && v.srcObject.getAudioTracks) {
-        v.srcObject.getAudioTracks().forEach(function(t){ try { t.enabled = !wantMuted; } catch(e) {} });
-      }
-      if (typeof v.getAudioTracks === 'function') {
-        try { v.getAudioTracks().forEach(function(t){ t.enabled = !wantMuted; }); } catch(e) {}
-      }
-      var p = v.play();
-      if (p && p.catch) p.catch(function(){});
-    } catch(e) {}
-  }
-  document.querySelectorAll('video,audio').forEach(applyMedia);
-  // Resume any AudioContext created by the page (MSE/WebRTC players).
   try {
-    var Ctx = window.AudioContext || window.webkitAudioContext;
-    if (Ctx) {
-      if (!window.__falcorAudioCtx) {
-        try { window.__falcorAudioCtx = new Ctx(); } catch(e) {}
-      }
-      var ctxs = [];
-      if (window.__falcorAudioCtx) ctxs.push(window.__falcorAudioCtx);
-      try {
-        if (typeof window.__audioContexts !== 'undefined' && window.__audioContexts && window.__audioContexts.forEach) {
-          window.__audioContexts.forEach(function(c){ ctxs.push(c); });
-        }
-      } catch(e) {}
-      ctxs.forEach(function(c){
-        try { if (c && c.state === 'suspended') c.resume(); } catch(e) {}
-      });
+    if (!document.getElementById('falcor-talk-css')) {
+      var s = document.createElement('style');
+      s.id = 'falcor-talk-css';
+      s.textContent = [
+        'html,body{margin:0!important;padding:0!important;background:#000!important;overflow:hidden!important;width:100%!important;height:100%!important;}',
+        'video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;}',
+        'nav,aside,header,footer,[class*=sidebar],[class*=history],[class*=History],[class*=timeline],[class*=Timeline],[class*=review],[id*=sidebar]{display:none!important;}'
+      ].join('');
+      (document.head || document.documentElement).appendChild(s);
     }
+    document.querySelectorAll('video').forEach(function(v){
+      try {
+        v.setAttribute('playsinline','');
+        v.setAttribute('webkit-playsinline','');
+        var p = v.play();
+        if (p && p.catch) p.catch(function(){});
+      } catch(e) {}
+    });
   } catch(e) {}
-  // Do NOT click page mute/volume buttons — that can change go2rtc/Frigate stream UI.
 })();
 """
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun keyAndroidView(
+private fun TalkWebView(
     pageUrl: String,
     bearerToken: String?,
     showDetections: Boolean,
     allowMicrophone: Boolean,
-    muted: Boolean,
-    audioController: WebViewAudioController?,
     onPlaying: () -> Unit,
     onMainFrameError: () -> Unit,
     onStarted: () -> Unit
@@ -297,8 +177,6 @@ private fun keyAndroidView(
     val onErrorState by rememberUpdatedState(onMainFrameError)
     val showDet by rememberUpdatedState(showDetections)
     val allowMic by rememberUpdatedState(allowMicrophone)
-    val mutedFlag by rememberUpdatedState(muted)
-    val controller by rememberUpdatedState(audioController)
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -309,10 +187,8 @@ private fun keyAndroidView(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
-                // Allow touches to reach native HTML5 media controls (Compose overlay leaves bottom gap).
                 isClickable = true
                 isFocusable = true
-                isFocusableInTouchMode = true
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.mediaPlaybackRequiresUserGesture = false
@@ -320,12 +196,8 @@ private fun keyAndroidView(
                 settings.cacheMode = WebSettings.LOAD_DEFAULT
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
-                settings.allowFileAccess = true
-                settings.allowContentAccess = true
                 CookieManager.getInstance().setAcceptCookie(true)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-                controller?.attach(this)
 
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")
                     ?.removePrefix("bearer ")?.trim().orEmpty()
@@ -364,13 +236,10 @@ private fun keyAndroidView(
                             "var s2=document.createElement('style');s2.innerHTML='canvas,.bounding-box,[class*=detect]{display:none!important;}';document.head.appendChild(s2);"
                         } else ""
                         view?.evaluateJavascript(
-                            "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;pointer-events:auto!important;}';document.head.appendChild(s);$hideBoxes})();",
+                            "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;}';document.head.appendChild(s);$hideBoxes})();",
                             null
                         )
-                        // Start unmuted unless Compose says muted; autoplay-with-sound may still
-                        // fail until mute-button tap (user gesture) re-applies unmute+play.
-                        view?.evaluateJavascript(muteFlagJs(mutedFlag) + PLAYER_CHROME_JS, null)
-                        view?.evaluateJavascript(applyMuteJs(mutedFlag), null)
+                        view?.evaluateJavascript(TALK_CHROME_JS, null)
                     }
 
                     override fun onReceivedError(
@@ -400,7 +269,6 @@ private fun keyAndroidView(
         update = { webView ->
             @Suppress("UNUSED_EXPRESSION")
             allowMic
-            controller?.attach(webView)
             if (webView.url != pageUrl) {
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")
                     ?.removePrefix("bearer ")?.trim().orEmpty()
@@ -408,13 +276,9 @@ private fun keyAndroidView(
                 val headers = mutableMapOf<String, String>()
                 if (token.isNotEmpty()) headers["Authorization"] = "Bearer $token"
                 webView.loadUrl(pageUrl, headers)
-            } else {
-                webView.evaluateJavascript(muteFlagJs(mutedFlag) + PLAYER_CHROME_JS, null)
-                webView.evaluateJavascript(applyMuteJs(mutedFlag), null)
             }
         },
         onRelease = { webView ->
-            controller?.detach(webView)
             webView.stopLoading()
         }
     )
