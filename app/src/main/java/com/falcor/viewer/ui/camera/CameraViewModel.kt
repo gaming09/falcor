@@ -78,6 +78,8 @@ sealed class CameraUserMessage {
     data class ClipSaveFailed(val message: String) : CameraUserMessage()
     data object CastFailed : CameraUserMessage()
     data object CastStarted : CameraUserMessage()
+    data object CastNoDevice : CameraUserMessage()
+    data object CastAuthUrlWarning : CameraUserMessage()
 }
 
 class CameraViewModel(
@@ -374,10 +376,20 @@ class CameraViewModel(
         }
     }
 
-    fun notifyCast(ok: Boolean) {
-        viewModelScope.launch {
-            _messages.emit(if (ok) CameraUserMessage.CastStarted else CameraUserMessage.CastFailed)
-        }
+    fun notifyCastStarted() {
+        viewModelScope.launch { _messages.emit(CameraUserMessage.CastStarted) }
+    }
+
+    fun notifyCastFailed() {
+        viewModelScope.launch { _messages.emit(CameraUserMessage.CastFailed) }
+    }
+
+    fun notifyCastNoDevice() {
+        viewModelScope.launch { _messages.emit(CameraUserMessage.CastNoDevice) }
+    }
+
+    fun notifyCastAuthWarning() {
+        viewModelScope.launch { _messages.emit(CameraUserMessage.CastAuthUrlWarning) }
     }
 
     fun ptz(command: String) {

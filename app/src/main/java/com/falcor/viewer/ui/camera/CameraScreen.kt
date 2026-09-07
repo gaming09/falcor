@@ -98,6 +98,10 @@ import com.falcor.viewer.R
 import com.falcor.viewer.cast.CastHelper
 import com.falcor.viewer.player.AuthenticatedClipPlayer
 import com.falcor.viewer.player.FrigateLiveWebView
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.foundation.layout.heightIn
+import com.falcor.viewer.cast.CastOutcome
+import com.falcor.viewer.player.WebViewAudioController
 import com.falcor.viewer.player.OkHttpLivePreview
 import com.falcor.viewer.player.VlcPlayer
 import com.falcor.viewer.ui.components.ErrorRetry
@@ -121,6 +125,9 @@ fun CameraScreen(
     val historyFailed = stringResource(R.string.media_download_failed)
     val castFailed = stringResource(R.string.cast_failed)
     val castStarted = stringResource(R.string.cast_started)
+    val castNoDevice = stringResource(R.string.cast_no_device)
+    val castAuthWarning = stringResource(R.string.cast_auth_url_warning)
+    val audioController = remember { WebViewAudioController() }
     var pendingTalkAfterPermission by remember { mutableStateOf(false) }
     val micPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -152,6 +159,8 @@ fun CameraScreen(
                     )
                 CameraUserMessage.CastFailed -> snackbarHostState.showSnackbar(castFailed)
                 CameraUserMessage.CastStarted -> snackbarHostState.showSnackbar(castStarted)
+                CameraUserMessage.CastNoDevice -> snackbarHostState.showSnackbar(castNoDevice)
+                CameraUserMessage.CastAuthUrlWarning -> snackbarHostState.showSnackbar(castAuthWarning)
             }
         }
     }
@@ -186,7 +195,12 @@ fun CameraScreen(
                             contentDescription = stringResource(R.string.camera_toggle_detections)
                         )
                     }
-                    IconButton(onClick = viewModel::toggleAudioMuted) {
+                    IconButton(onClick = {
+                        val nextMuted = !state.audioMuted
+                        // Same click path = user gesture → WebView unmute+play must work.
+                        audioController.applyMute(nextMuted)
+                        viewModel.setAudioMuted(nextMuted)
+                    }) {
                         Icon(
                             if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
                             contentDescription = stringResource(
@@ -196,14 +210,15 @@ fun CameraScreen(
                         )
                     }
                     IconButton(onClick = {
-                        val ok = CastHelper.castStream(
-                            context,
-                            viewModel.castStreamUrl(),
-                            state.cameraName,
-                            if (viewModel.castStreamUrl().contains("m3u8", true))
-                                "application/x-mpegURL" else "video/x-motion-jpeg"
-                        )
-                        viewModel.notifyCast(ok)
+                        val url = viewModel.castStreamUrl()
+                        val mime = if (url.contains("m3u8", true))
+                            "application/x-mpegURL" else "video/x-motion-jpeg"
+                        when (CastHelper.castStream(context, url, state.cameraName, mime)) {
+                            CastOutcome.Started -> viewModel.notifyCastStarted()
+                            CastOutcome.NoSession -> viewModel.notifyCastNoDevice()
+                            CastOutcome.LoadFailed -> viewModel.notifyCastFailed()
+                            CastOutcome.AuthUrlWarning -> viewModel.notifyCastAuthWarning()
+                        }
                     }) {
                         Icon(Icons.Default.Cast, contentDescription = stringResource(R.string.cast_camera))
                     }
@@ -250,6 +265,7 @@ fun CameraScreen(
                             state = state,
                             viewModel = viewModel,
                             isLandscape = isLandscape,
+                            audioController = audioController,
                             modifier = Modifier.fillMaxWidth()
                         )
                         if (state.talking) {
@@ -293,28 +309,10 @@ fun CameraScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp),
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        AssistChip(
-                            onClick = viewModel::toggleAudioMuted,
-                            label = {
-                                Text(
-                                    stringResource(
-                                        if (state.audioMuted) R.string.camera_unmute
-                                        else R.string.camera_mute
-                                    )
-                                )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    if (state.audioMuted) Icons.Default.VolumeOff
-                                    else Icons.Default.VolumeUp,
-                                    contentDescription = null
-                                )
-                            }
-                        )
                         if (state.talkSupported) {
                             HoldTalkButton(
                                 talking = state.talking,
@@ -331,12 +329,6 @@ fun CameraScreen(
                                 },
                                 onRelease = { viewModel.setTalking(false) }
                             )
-                        } else {
-                            Text(
-                                stringResource(R.string.camera_talk_unavailable),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
                         }
                         if (state.ptzSupported) {
                             AssistChip(
@@ -347,33 +339,6 @@ fun CameraScreen(
                                 }
                             )
                         }
-                        AssistChip(
-                            onClick = { viewModel.setShowDetections(!state.showDetections) },
-                            label = {
-                                Text(
-                                    stringResource(
-                                        if (state.showDetections) R.string.camera_detections_on
-                                        else R.string.camera_detections_off
-                                    )
-                                )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    if (state.showDetections) Icons.Default.Visibility
-                                    else Icons.Default.VisibilityOff,
-                                    contentDescription = null
-                                )
-                            }
-                        )
-                    }
-
-                    if (state.talkSupported) {
-                        Text(
-                            stringResource(R.string.camera_talk_hold_hint),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
 
                     Text(
@@ -400,7 +365,13 @@ fun CameraScreen(
                         onValueChange = viewModel::onHistoryScrub,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp)
+                            .padding(horizontal = 16.dp, vertical = 0.dp)
+                            .heightIn(max = 28.dp),
+                        colors = SliderDefaults.colors(
+                            thumbColor = MaterialTheme.colorScheme.primary,
+                            activeTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f),
+                            inactiveTrackColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+                        )
                     )
                     val label = state.scrubTimestamp?.let {
                         java.text.DateFormat.getDateTimeInstance().format(java.util.Date((it * 1000).toLong()))
@@ -414,16 +385,16 @@ fun CameraScreen(
                     AssistChip(
                         onClick = viewModel::jumpToLive,
                         label = { Text(stringResource(R.string.camera_history_live)) },
-                        modifier = Modifier.padding(16.dp)
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
-                    Spacer(Modifier.height(24.dp))
+                    Spacer(Modifier.height(16.dp))
                 }
             }
         }
     }
 
     if (state.fullscreen) {
-        FullscreenLiveDialog(state = state, viewModel = viewModel)
+        FullscreenLiveDialog(state = state, viewModel = viewModel, audioController = audioController)
     }
 
     if (state.ptzSheetOpen && state.ptzSupported) {
@@ -463,7 +434,7 @@ private fun HoldTalkButton(
         modifier = Modifier
             .clip(RoundedCornerShape(20.dp))
             .background(bg)
-            .semantics { contentDescription = "Talk" }
+            .semantics { contentDescription = "Hold to talk; release to stop" }
             .pointerInteropFilter { event ->
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
@@ -503,7 +474,8 @@ private fun LiveOrClipSurface(
     viewModel: CameraViewModel,
     isLandscape: Boolean,
     modifier: Modifier = Modifier,
-    fill: Boolean = false
+    fill: Boolean = false,
+    audioController: WebViewAudioController? = null
 ) {
     val aspectMod = if (fill) {
         modifier.fillMaxSize()
@@ -536,6 +508,7 @@ private fun LiveOrClipSurface(
                             showDetections = state.showDetections && !state.talking,
                             allowMicrophone = state.talking,
                             muted = state.audioMuted && !state.talking,
+                            audioController = audioController,
                             onAllFailed = {
                                 if (state.talking) viewModel.onTalkWebRtcFailed()
                                 else viewModel.onWebViewLiveFailed()
@@ -572,7 +545,8 @@ private fun LiveOrClipSurface(
 @Composable
 private fun FullscreenLiveDialog(
     state: CameraUiState,
-    viewModel: CameraViewModel
+    viewModel: CameraViewModel,
+    audioController: WebViewAudioController
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -615,6 +589,7 @@ private fun FullscreenLiveDialog(
                 viewModel = viewModel,
                 isLandscape = true,
                 fill = true,
+                audioController = audioController,
                 modifier = Modifier.fillMaxSize()
             )
             if (state.talking) {
@@ -631,7 +606,11 @@ private fun FullscreenLiveDialog(
                 )
             }
             IconButton(
-                onClick = viewModel::toggleAudioMuted,
+                onClick = {
+                    val nextMuted = !state.audioMuted
+                    audioController.applyMute(nextMuted)
+                    viewModel.setAudioMuted(nextMuted)
+                },
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(16.dp)

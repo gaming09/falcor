@@ -13,8 +13,8 @@ android {
         applicationId = "com.falcor.viewer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.1.8"
+        versionCode = 10
+        versionName = "0.1.9"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -81,6 +81,7 @@ dependencies {
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.mediarouter)
+    implementation(libs.androidx.appcompat)
     implementation(libs.play.services.cast.framework)
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

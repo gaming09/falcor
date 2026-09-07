@@ -3,13 +3,15 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.8**
+Version: **0.1.9**
 
-## Features (0.1.8)
+## Features (0.1.9)
 
+- **Working live mute/unmute** — app-bar Compose mute holds a stable `WebView` reference and runs unmute+`play()` on the same click path (user gesture). JS sets `window.__falcorMuted`, HTML5 `muted`/`volume`, and WebRTC audio track `enabled`; strips native player chrome. VLC path uses volume 0/100.
+- **Cleaner camera UI** — single app-bar mute; short PTT hint via talk button contentDescription; thinner history scrubber; detections stay in the app bar.
+- **Cast via MediaRouter** — if no Cast session, opens the system route picker with a snackbar; prefers unauthenticated `http://{host}:5000/api/...` HLS/MJPEG when Frigate base is `:8971` (Chromecast cannot send JWT).
 - **Long-press + drag reorder** on the home camera grid — order persisted in DataStore; new cameras append at the end.
 - **Smoother camera enable/disable** — optimistic Switch, disabled while in-flight, soft merge by name (no full-grid refresh flash / scroll jump).
-- **Explicit mute/unmute** on camera detail (app bar + under player + fullscreen) — Compose `VolumeUp`/`VolumeOff` controls live audio independently of stripped WebView chrome (JS mute on `<video>`; VLC volume 0/100).
 - **Smarter config scan** on login / home refresh — deep rule-based analysis of `GET /api/config` (+ `GET /api/go2rtc/streams` keys): maps live / talk / PTZ / listen-audio per camera; listen audio still detected when talk is missing; prefers live stream names; heuristics documented below.
 - **Home camera enable/disable** — Frigate WebSocket `{camera}/enabled/set` with `ON`/`OFF`, HTTP PUT fallback, home keeps WS connected, snackbar on failure.
 - **Press-and-hold talk (Frigate-style)** — same live frame, WebRTC `media=video+audio+microphone`, no HTML player chrome.
@@ -114,10 +116,19 @@ app/src/main/java/com/falcor/viewer/
 - README and UI examples use placeholders only (`https://frigate.example:8971`, `camera_front`, `YOUR_TOKEN`).
 - Never commit user Frigate credentials, JWTs, or screenshots that expose real camera names / LAN IPs.
 
+### Cast (single camera)
+
+Tap Cast on the camera screen. If no Cast session is connected, Falcor opens the system MediaRouter chooser and shows “Pick a Cast device…”. Streams prefer `http://{host}:5000/api/go2rtc/stream.m3u8?src=…` (or MJPEG) so Chromecast does not need a JWT. Use placeholders only in docs (`frigate.example`, `camera_front`).
+
+### Live audio mute
+
+The app-bar speaker button is the mute control. It updates ViewModel state **and** calls `WebViewAudioController.applyMute` on the same click so unmute+play shares the user gesture. HTML controls / muted-speaker chrome inside the WebView frame are stripped via CSS/JS.
+
 ## Known limits
 
 - **Dashboard Cast:** not implemented — only the focused camera stream is castable.
-- **Cast + JWT:** Default Media Receiver cannot send Frigate auth headers; prefer open HTTP on the LAN for Cast.
+- **Cast + JWT:** Default Media Receiver cannot send Frigate auth headers. Falcor rewrites `:8971` bases to `http://{host}:5000/api/...` for Cast when possible; if your Frigate API is not open on :5000, Cast may fail — use placeholders like `http://frigate.example:5000` in docs, never real LAN IPs.
+- **Mute + autoplay:** Android WebView may block unmuted autoplay until the first mute-button tap (user gesture); that tap synchronously unmutes and calls `play()`.
 - **Talk:** depends on Frigate go2rtc talk/onvif/reolink audio; app grants WebView mic but cannot fix missing server talk config.
 - **Detection boxes:** depend on Frigate WS payloads; some versions expose richer data in the web UI only.
 - **WebView live:** uses go2rtc HTML players Frigate already ships; if those routes 404, Falcor falls back automatically.

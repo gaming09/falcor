@@ -39,10 +39,42 @@ import java.net.URI
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
+ * Holds a stable [WebView] reference so mute/unmute can run
+ * [WebView.evaluateJavascript] synchronously on the mute-button click path
+ * (user gesture → unmuted autoplay).
+ */
+class WebViewAudioController {
+    @Volatile
+    var webView: WebView? = null
+        private set
+
+    fun attach(view: WebView) {
+        webView = view
+    }
+
+    fun detach(view: WebView) {
+        if (webView === view) webView = null
+    }
+
+    /** Apply mute/unmute + play immediately (call from button onClick / user gesture). */
+    fun applyMute(muted: Boolean) {
+        val wv = webView ?: return
+        val js = applyMuteJs(muted)
+        // Click path is on the UI thread — evaluate now so unmuted play shares the gesture.
+        try {
+            wv.evaluateJavascript(js, null)
+        } catch (_: Throwable) {
+            wv.post { runCatching { wv.evaluateJavascript(js, null) } }
+        }
+    }
+}
+
+/**
  * Authenticated WebView hosting Frigate/go2rtc MSE or WebRTC live / talk player pages.
  *
  * - Autoplay + unmuted HTML5 video (live audio)
  * - Grants CAMERA / AUDIO_CAPTURE for getUserMedia (two-way talk)
+ * - Compose mute drives JS via [WebViewAudioController] (user-gesture safe)
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -56,6 +88,7 @@ fun FrigateLiveWebView(
     allowMicrophone: Boolean = false,
     /** Compose-driven mute — injects JS on <video>/<audio> (HTML speaker is stripped). */
     muted: Boolean = false,
+    audioController: WebViewAudioController? = null,
     onPlaying: (() -> Unit)? = null,
     onAllFailed: (() -> Unit)? = null
 ) {
@@ -68,6 +101,7 @@ fun FrigateLiveWebView(
     val allowMicState by rememberUpdatedState(allowMicrophone)
     val mutedState by rememberUpdatedState(muted)
     val urlsState by rememberUpdatedState(pageUrls)
+    val controllerState by rememberUpdatedState(audioController)
     val attempt = remember { AtomicInteger(0) }
     val pageUrl = pageUrls.getOrNull(candidateIndex)
     val context = LocalContext.current
@@ -77,6 +111,11 @@ fun FrigateLiveWebView(
         exhausted = false
         loading = true
         attempt.set(0)
+    }
+
+    // Keep controller mute in sync when StateFlow changes (e.g. fullscreen / talk).
+    LaunchedEffect(muted) {
+        controllerState?.applyMute(muted)
     }
 
     // Request audio focus so live audio is audible over other apps when possible.
@@ -111,6 +150,7 @@ fun FrigateLiveWebView(
                 showDetections = showDetState,
                 allowMicrophone = allowMicState,
                 muted = mutedState,
+                audioController = controllerState,
                 onPlaying = { loading = false; onPlayingState?.invoke() },
                 onMainFrameError = {
                     val next = candidateIndex + 1
@@ -154,7 +194,11 @@ private const val PLAYER_CHROME_JS = """
           'video::-webkit-media-controls-enclosure{display:none!important;}',
           'video::-webkit-media-controls-panel{display:none!important;}',
           'video::-webkit-media-controls-start-playback-button{display:none!important;}',
-          '.vjs-control-bar,.video-js .vjs-big-play-button,button.play,[class*=control],[class*=Controls],.plyr__controls{display:none!important;opacity:0!important;pointer-events:none!important;}'
+          'video::-webkit-media-controls-mute-button{display:none!important;}',
+          'video::-webkit-media-controls-volume-slider{display:none!important;}',
+          'video::-webkit-media-controls-overlay-play-button{display:none!important;}',
+          'audio{display:none!important;}',
+          '.vjs-control-bar,.video-js .vjs-big-play-button,button.play,[class*=control],[class*=Controls],.plyr__controls,[class*=mute],[class*=Mute],[class*=volume],[class*=Volume],.mute-button,.volume-button{display:none!important;opacity:0!important;pointer-events:none!important;visibility:hidden!important;}'
         ].join('');
         (document.head || document.documentElement).appendChild(s);
       }
@@ -168,11 +212,13 @@ private const val PLAYER_CHROME_JS = """
           v.muted = muted;
           v.defaultMuted = muted;
           v.volume = muted ? 0.0 : 1.0;
+          if (v.srcObject && v.srcObject.getAudioTracks) {
+            v.srcObject.getAudioTracks().forEach(function(t){ t.enabled = !muted; });
+          }
           var p = v.play();
           if (p && p.catch) p.catch(function(){});
         } catch(e) {}
       });
-      // Click any lingering big-play overlay once (then hide via CSS).
       var btn = document.querySelector('button[aria-label*="play" i],button.play,button[title*="play" i],.vjs-big-play-button');
       if (btn) try { btn.click(); } catch(e) {}
     } catch(e) {}
@@ -188,14 +234,21 @@ private const val PLAYER_CHROME_JS = """
 private fun muteFlagJs(muted: Boolean): String =
     "window.__falcorMuted = ${if (muted) "true" else "false"};"
 
-private fun applyMuteJs(muted: Boolean): String = """
+internal fun applyMuteJs(muted: Boolean): String = """
 (function(){
   window.__falcorMuted = ${if (muted) "true" else "false"};
   document.querySelectorAll('video,audio').forEach(function(v){
     try {
+      v.removeAttribute('controls');
+      v.controls = false;
       v.muted = ${if (muted) "true" else "false"};
       v.defaultMuted = ${if (muted) "true" else "false"};
       v.volume = ${if (muted) "0.0" else "1.0"};
+      if (v.srcObject && v.srcObject.getAudioTracks) {
+        v.srcObject.getAudioTracks().forEach(function(t){ t.enabled = ${if (muted) "false" else "true"}; });
+      }
+      var p = v.play();
+      if (p && p.catch) p.catch(function(){});
     } catch(e) {}
   });
 })();
@@ -209,6 +262,7 @@ private fun keyAndroidView(
     showDetections: Boolean,
     allowMicrophone: Boolean,
     muted: Boolean,
+    audioController: WebViewAudioController?,
     onPlaying: () -> Unit,
     onMainFrameError: () -> Unit,
     onStarted: () -> Unit
@@ -218,6 +272,7 @@ private fun keyAndroidView(
     val showDet by rememberUpdatedState(showDetections)
     val allowMic by rememberUpdatedState(allowMicrophone)
     val mutedFlag by rememberUpdatedState(muted)
+    val controller by rememberUpdatedState(audioController)
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -235,11 +290,12 @@ private fun keyAndroidView(
                 settings.cacheMode = WebSettings.LOAD_DEFAULT
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
-                // Allow WebRTC / getUserMedia
                 settings.allowFileAccess = true
                 settings.allowContentAccess = true
                 CookieManager.getInstance().setAcceptCookie(true)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+                controller?.attach(this)
 
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")
                     ?.removePrefix("bearer ")?.trim().orEmpty()
@@ -250,8 +306,6 @@ private fun keyAndroidView(
                 webChromeClient = object : WebChromeClient() {
                     override fun onPermissionRequest(request: PermissionRequest?) {
                         if (request == null) return
-                        // Always grant AUDIO_CAPTURE / VIDEO_CAPTURE for go2rtc talk + live WebRTC.
-                        // (Android RECORD_AUDIO must already be granted by the activity before PTT.)
                         val wanted = request.resources ?: return
                         val grant = wanted.filter {
                             it == PermissionRequest.RESOURCE_AUDIO_CAPTURE ||
@@ -283,8 +337,10 @@ private fun keyAndroidView(
                             "(function(){var s=document.createElement('style');s.innerHTML='html,body{margin:0;background:#000;overflow:hidden;width:100%;height:100%;}video{width:100%!important;height:100%!important;object-fit:contain!important;background:#000!important;}video::-webkit-media-controls{display:none!important;}';document.head.appendChild(s);$hideBoxes})();",
                             null
                         )
-                        // Set mute flag then strip controls / autoplay (live listen + talk).
+                        // Start unmuted unless Compose says muted; autoplay-with-sound may still
+                        // fail until mute-button tap (user gesture) re-applies unmute+play.
                         view?.evaluateJavascript(muteFlagJs(mutedFlag) + PLAYER_CHROME_JS, null)
+                        view?.evaluateJavascript(applyMuteJs(mutedFlag), null)
                     }
 
                     override fun onReceivedError(
@@ -312,9 +368,9 @@ private fun keyAndroidView(
             }
         },
         update = { webView ->
-            // Keep mic permission grant path current (chrome client already grants).
             @Suppress("UNUSED_EXPRESSION")
             allowMic
+            controller?.attach(webView)
             if (webView.url != pageUrl) {
                 val token = bearerToken?.trim()?.removePrefix("Bearer ")
                     ?.removePrefix("bearer ")?.trim().orEmpty()
@@ -323,10 +379,13 @@ private fun keyAndroidView(
                 if (token.isNotEmpty()) headers["Authorization"] = "Bearer $token"
                 webView.loadUrl(pageUrl, headers)
             } else {
-                // Re-assert chrome + apply Compose mute without reloading the page.
                 webView.evaluateJavascript(muteFlagJs(mutedFlag) + PLAYER_CHROME_JS, null)
                 webView.evaluateJavascript(applyMuteJs(mutedFlag), null)
             }
+        },
+        onRelease = { webView ->
+            controller?.detach(webView)
+            webView.stopLoading()
         }
     )
 }

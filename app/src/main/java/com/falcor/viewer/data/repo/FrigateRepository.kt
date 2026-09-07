@@ -608,11 +608,42 @@ class FrigateRepository(
         }.distinct()
     }
 
-    /** Best-effort castable URL (HLS via Frigate, else MJPEG). */
+    /**
+     * Cast-friendly stream URL. Chromecast cannot send Frigate JWT, so when the
+     * app base is HTTPS :8971 we prefer unauthenticated HTTP on the same host
+     * port 5000 (`http://{host}:5000/api/...`). If already on :5000, keep it.
+     */
     fun castableStreamUrl(camera: String, preferSub: Boolean = true): String {
-        val urls = liveStreamUrls(camera, preferSub, emptyList())
-        return urls.firstOrNull { it.contains("m3u8", true) }
-            ?: mjpegLiveUrl(camera)
+        val castBase = castUnauthenticatedBaseUrl()
+        val camCfg = cachedConfig?.cameras?.get(camera)
+        val go2rtc = cachedConfig?.go2rtc
+        val preferred = resolvePreferredStreamName(
+            camera = camera,
+            preferSub = preferSub,
+            roleMap = camCfg?.live?.streams.orEmpty(),
+            streamNames = camCfg?.let {
+                resolveStreamNames(camera, it, go2rtc?.streamKeys.orEmpty())
+            }.orEmpty(),
+            go2rtcKeys = go2rtc?.streamKeys.orEmpty()
+        )
+        val src = preferred.ifBlank { camera }
+        val hls = "$castBase/api/go2rtc/stream.m3u8?src=$src"
+        val mjpeg = "$castBase/api/$camera"
+        return if (preferSub || src.isNotBlank()) hls else mjpeg
+    }
+
+    /** http://{host}:5000 when base is :8971 / https auth UI; else current base if already :5000. */
+    fun castUnauthenticatedBaseUrl(): String {
+        val raw = baseUrl.trimEnd('/')
+        val uri = runCatching { URI(raw) }.getOrNull() ?: return raw
+        val host = uri.host ?: return raw
+        val port = uri.port
+        return when {
+            port == 5000 -> raw
+            port == -1 && uri.scheme.equals("http", ignoreCase = true) -> raw
+            // Auth UI port or any other non-5000 → prefer open HTTP API for Cast
+            else -> "http://$host:5000"
+        }
     }
 
     fun webrtcTalkPageUrls(camera: String, streamName: String?): List<String> {
