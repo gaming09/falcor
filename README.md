@@ -3,9 +3,9 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.25**
+Version: **0.1.28**
 
-## Features (0.1.25 — exact 0.1.22 restore)
+## Features (0.1.28 — exact 0.1.25/0.1.22 restore; Amcrest listen deferred)
 
 - **Prefer A/V+listen live src (0.1.22)** — live WebView `?src=` prefers go2rtc/main keys with **both** video and audio (`#video=` / plain `rtsp://` **and** `#audio=`/opus/aac). Skips audio-only helpers (`ffmpeg:…#audio=opus` without video — typical `*_webrtc` / "WebRTC Audio"). Main/Sub chips bind to `state.quality` (default MAIN); probe `q=` matches. Video-only cams keep video src + no-listen snackbar.
 - **Diagnostic probe for listen audio (0.1.20)** — after live WebView playing (+ ~2s), Snackbar + `Log.i("FalcorAudioProbe")` report src/quality/pathKind/muted/volume/tracks (probe-only; no product mute changes). Kept to verify A/V src + `vTracks=1`.

@@ -13,8 +13,8 @@ android {
         applicationId = "com.falcor.viewer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "0.1.25"
+        versionCode = 29
+        versionName = "0.1.28"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
         ndk {
