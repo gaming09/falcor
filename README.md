@@ -3,10 +3,11 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.6**
+Version: **0.1.7**
 
-## Features (0.1.6)
+## Features (0.1.7)
 
+- **Home camera enable/disable** — Frigate WebSocket `{camera}/enabled/set` with `ON`/`OFF` (same as the web UI), HTTP PUT fallback, home keeps WS connected, snackbar on failure.
 - **Config capability scan on login / resume** — always `GET /api/config` (and optionally `GET /api/go2rtc/streams`) after login and when the app resumes with a saved session. Builds a per-camera map of `liveStreamName` / `talkStreamName` / talk+PTZ flags, persists it, and logs what was detected (no silent “talk unavailable” when config has talk).
 - **Press-and-hold talk (Frigate-style)** — keeps the **same** live player frame (black, no HTML5 controls / play button). On hold, reconnects WebRTC with `media=video+audio+microphone` (prefer dedicated talk stream). On release, restores listen URLs with `media=video+audio`. Thin “Talking…” badge only — never a dialog.
 - **Live listen audio** — default live WebRTC/MSE pages request `media=video+audio`; WebView JS removes `controls`, unmutes, and autoplays.
@@ -57,6 +58,10 @@ Press and hold **Hold to talk** on the camera screen. Falcor:
 Talk streams are detected at login/resume from go2rtc source strings (`onvif://`, `reolink://`, backchannel, `#audio=opus`) and dedicated talk keys — see Logcat tag `FrigateRepository` for the capability scan summary.
 
 **Frigate-side caveats:** Talk still requires a go2rtc stream that supports two-way audio. If hold-to-talk never connects after mic permission, check Frigate/go2rtc talk config for that camera.
+
+### Camera enable / disable
+
+Home grid Switch uses Frigate WS: `{"topic":"<cam>/enabled/set","payload":"ON"|"OFF","retain":false}` (same as Frigate web `useEnabledState`). HTTP `PUT /api/camera/{cam}/set/enabled` is fallback only. Failures show a snackbar and revert the Switch.
 
 ### PTZ
 

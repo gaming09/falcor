@@ -226,17 +226,32 @@ class FrigateRepository(
         }
 
     /**
-     * Enable/disable camera via Frigate runtime API.
-     * Primary: PUT /api/camera/{name}/set/enabled {"value":"ON"|"OFF"}
+     * Enable/disable camera — same path as Frigate web UI.
+     * Primary: WebSocket topic `{camera}/enabled/set` payload `ON`|`OFF`.
+     * Fallback: PUT /api/camera/{name}/set/enabled {"value":"ON"|"OFF"}.
      */
     suspend fun setCameraEnabled(camera: String, enabled: Boolean): Result<Unit> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val value = if (enabled) "ON" else "OFF"
-                val response = requireApi().setCameraFeature(camera, "enabled", CameraSetBody(value))
-                if (!response.isSuccessful) {
-                    error("Enable/disable failed: HTTP ${response.code()}")
+                ensureWsConnected()
+                val ws = wsClient
+                val wsOk = ws != null && ws.sendEnabled(camera, enabled)
+                if (!wsOk) {
+                    Log.w(TAG, "WS enabled/set failed for $camera — trying HTTP fallback")
+                    val value = if (enabled) "ON" else "OFF"
+                    val response = runCatching {
+                        requireApi().setCameraFeature(camera, "enabled", CameraSetBody(value))
+                    }.getOrNull()
+                    if (response == null || !response.isSuccessful) {
+                        if (ws?.state?.value != FrigateWsClient.ConnectionState.CONNECTED) {
+                            error("Camera enable WebSocket unavailable — check Frigate WS")
+                        }
+                        error(
+                            "Enable/disable failed: HTTP ${response?.code() ?: "no response"}"
+                        )
+                    }
                 }
+                // Refresh config so enabled flags match Frigate.
                 runCatching { refreshConfig() }
                 Unit
             }

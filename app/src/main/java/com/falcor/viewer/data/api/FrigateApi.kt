@@ -35,7 +35,8 @@ interface FrigateApi {
     suspend fun getConfig(): FrigateConfig
 
     /**
-     * Runtime camera feature toggle (Frigate 0.14+).
+     * Runtime camera feature toggle HTTP fallback (Frigate 0.14+).
+     * Prefer WebSocket `{camera}/enabled/set` with payload ON|OFF (see FrigateWsClient).
      * PUT /api/camera/{camera}/set/enabled  body: {"value":"ON"|"OFF"}
      */
     @PUT("camera/{camera}/set/{feature}")

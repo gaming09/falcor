@@ -46,6 +46,7 @@
     <string name="home_logout_confirm">Sign out</string>
     <string name="home_cancel">Cancel</string>
     <string name="home_grid_cameras">%1$d cameras</string>
+    <string name="home_toggle_failed">Could not toggle %1$s — check Frigate connection</string>
 
     <!-- Camera detail -->
     <string name="camera_live">Live</string>

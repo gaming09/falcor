@@ -96,6 +96,14 @@ class FrigateWsClient(
     fun sendPtz(camera: String, command: String): Boolean =
         send(topic = "$camera/ptz", payload = command, retain = false)
 
+    /** Frigate UI enable/disable: topic `{camera}/enabled/set`, payload `ON`|`OFF`. */
+    fun sendEnabled(camera: String, enabled: Boolean): Boolean =
+        send(
+            topic = "$camera/enabled/set",
+            payload = if (enabled) "ON" else "OFF",
+            retain = false
+        )
+
     private fun sendOnConnect() {
         val ws = webSocket ?: return
         val jsonMsg = buildJsonObject {

@@ -26,12 +26,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -58,8 +61,22 @@ fun HomeScreen(
     val app = LocalContext.current.applicationContext as com.falcor.viewer.FalcorApp
     val httpClient = remember { app.repository.authenticatedHttpClient() }
     val baseUrl = remember { app.repository.baseUrl.trimEnd('/') }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        viewModel.messages.collect { msg ->
+            when (msg) {
+                is HomeUserMessage.ToggleFailed ->
+                    snackbarHostState.showSnackbar(
+                        context.getString(R.string.home_toggle_failed, msg.camera)
+                    )
+            }
+        }
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
