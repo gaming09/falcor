@@ -5,7 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 0.1.26 — open-camera SPA guard: only (webrtc|mse|stream).html?src= embeds are live.
+ * 0.1.27 — thin open-camera SPA guard: only (webrtc|mse|stream).html?src= embeds are live.
  */
 class LiveEmbedUrlTest {
 

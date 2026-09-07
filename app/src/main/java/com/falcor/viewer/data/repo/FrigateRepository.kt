@@ -203,20 +203,25 @@ class FrigateRepository(
         runCatching {
             val config = cachedConfig ?: requireApi().getConfig().also { cachedConfig = it }
             val base = baseUrl
-            config.cameras.map { (name, cam) ->
-                val ptzInfo = runCatching { requireApi().getPtzInfo(name) }.getOrNull()
-                val cached = capabilityMap[name]
-                val derived = deriveCameraCapabilities(name, cam, config, base, ptzInfo)
-                val caps = if (cached != null) {
-                    derived.copy(
-                        showTalk = cached.showTalk || derived.showTalk,
-                        hasListenAudio = cached.hasListenAudio || derived.hasListenAudio,
-                        talkStreamName = cached.talkStreamName ?: derived.talkStreamName,
-                        liveStreamName = cached.liveStreamName ?: derived.liveStreamName,
-                        streamNames = cached.streamNames.ifEmpty { derived.streamNames }
-                    )
-                } else derived
-                caps.toUi()
+            // Per-camera isolate: one bad derive/toUi must not blank the whole home grid.
+            config.cameras.mapNotNull { (name, cam) ->
+                runCatching {
+                    val ptzInfo = runCatching { requireApi().getPtzInfo(name) }.getOrNull()
+                    val cached = capabilityMap[name]
+                    val derived = deriveCameraCapabilities(name, cam, config, base, ptzInfo)
+                    val caps = if (cached != null) {
+                        derived.copy(
+                            showTalk = cached.showTalk || derived.showTalk,
+                            hasListenAudio = cached.hasListenAudio || derived.hasListenAudio,
+                            talkStreamName = cached.talkStreamName ?: derived.talkStreamName,
+                            liveStreamName = cached.liveStreamName ?: derived.liveStreamName,
+                            streamNames = cached.streamNames.ifEmpty { derived.streamNames }
+                        )
+                    } else derived
+                    caps.toUi()
+                }.onFailure { e ->
+                    Log.e(TAG, "getCameras: skip camera=$name — ${e.message}", e)
+                }.getOrNull()
             }.sortedBy { it.name }
         }
     }
@@ -634,8 +639,9 @@ class FrigateRepository(
      * Candidate Frigate/go2rtc live player pages (MSE/WebRTC) for smooth WebView live.
      * Prefer these over LibVLC; OkHttp MJPEG remains fallback.
      *
-     * Order: opus / A/V+listen remux → WebRTC first (Reolink). Plain RTSP + listen →
-     * MSE first (Frigate web path for AAC), WebRTC as fallback. Never hardcode camera names.
+     * Order: opus / A/V+listen remux → WebRTC first (Reolink). Otherwise (plain RTSP/AAC) →
+     * MSE first (Frigate web path), WebRTC as fallback. Page-order only — no hasListen gate.
+     * Never hardcode camera names.
      */
     fun livePlayerPageUrls(
         camera: String,
@@ -671,14 +677,13 @@ class FrigateRepository(
             }
             if (preferSub) pick(true) ?: pick(false) else pick(false) ?: pick(true)
         }
-        val hasListen = hasListenCapableLiveSrc(camera)
         val webrtcFriendly = streamHasOpusOrWebRtcFriendlyAudio(preferred, go2rtc)
-        val mseFirstPreferred = preferMseFirstLivePlayer(preferred, go2rtc, hasListen)
+        val mseFirstPreferred = preferMseFirstLivePlayer(preferred, go2rtc)
         Log.d(
             TAG,
             "livePlayerPageUrls camera=$camera preferSub=$preferSub src=$preferred " +
                 "qualitySrc=$qualityOnly webrtcFriendly=$webrtcFriendly " +
-                "mseFirst=$mseFirstPreferred listenCapable=$hasListen"
+                "mseFirst=$mseFirstPreferred listenCapable=${hasListenCapableLiveSrc(camera)}"
         )
         val names = linkedSetOf<String>().apply {
             add(preferred)
@@ -692,7 +697,7 @@ class FrigateRepository(
         return buildList {
             names.forEach { n ->
                 val e = enc(n)
-                val mseFirst = preferMseFirstLivePlayer(n, go2rtc, hasListen)
+                val mseFirst = preferMseFirstLivePlayer(n, go2rtc)
                 addAll(orderedLiveEmbedPageUrls(base, e, media, mseFirst))
             }
         }.distinct()
@@ -859,7 +864,11 @@ class FrigateRepository(
         // Skip per-camera PTZ HTTP here (slow); ONVIF/config is enough for talk/live/audio mapping.
         // Camera screen still fetches ptz/info when opened.
         for ((name, cam) in working.cameras) {
-            val caps = deriveCameraCapabilities(name, cam, working, base, ptzInfo = null)
+            val caps = runCatching {
+                deriveCameraCapabilities(name, cam, working, base, ptzInfo = null)
+            }.onFailure { e ->
+                Log.e(TAG, "rebuildCapabilityMap: skip camera=$name — ${e.message}", e)
+            }.getOrNull() ?: continue
             map[name] = caps
             // Lightweight rule-based summary (no cloud AI) — helps debug talk/listen detection.
             Log.i(

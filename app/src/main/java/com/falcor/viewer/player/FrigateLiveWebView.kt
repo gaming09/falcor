@@ -54,8 +54,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Minimal chrome JS: black background + object-fit only (does not strip controls or force mute)
  * - 0.1.20-debug: FalcorAudioProbe snackbar + Log.i (probe-only; no product audio changes)
  * - 0.1.22-debug: keep probe; live src prefers A/V+listen, skips audio-only *_webrtc
- * - 0.1.26-debug: MSE-first for plain RTSP+listen; key(cameraName) + SPA embed lock
- *   (reload-once then fail). No JS candidate auto-advance / applyMute.
+ * - 0.1.27-debug: MSE-first page-order (!opus); key(cameraName) + thin SPA embed lock
+ *   (block #cameras / embed?src= / reload-once→OkHttp). No JS silentAvAdvance.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable

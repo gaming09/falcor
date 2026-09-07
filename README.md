@@ -3,13 +3,13 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.26**
+Version: **0.1.27**
 
-## Features (0.1.26-debug)
+## Features (0.1.27-debug)
 
-- **MSE-first for plain RTSP+listen (0.1.26)** — when live `src` lacks opus/A/V+listen remux but the camera is listen-capable (`audio.enabled` / ffmpeg audio / plain RTSP+AAC), prefer `mse.html?src=` first (Frigate web path for Amcrest AAC), then webrtc fallback. Opus/A/V+listen remux stays **webrtc-first** (Reolink). No camera-name hardcodes; no JS silent candidate advance.
-- **Ironclad embed lock (0.1.26)** — `key(cameraName)` fresh WebView per camera; block `#cameras` / `/cameras/`; require `(webrtc|mse|stream).html?src=`; on non-embed navigate reload intended once then fail to OkHttp (never leave Frigate SPA up).
-- **Probe href (0.1.26)** — FalcorAudioProbe snackbar includes truncated `location.href` for FrontYard→roaming3 embed proof.
+- **MSE-first page-order (0.1.27)** — when live `src` lacks opus/A/V+listen remux, prefer `mse.html?src=` first (Frigate web path for plain RTSP/AAC), then webrtc fallback. **No hasListen gate** on page order — Amcrest/plain RTSP gets MSE without expanding detectListen on home load. Opus/A/V+listen remux stays **webrtc-first** (Reolink). detectListenAudio / cameraHasListenCapableStream restored to **0.1.25**. Per-camera `runCatching` in getCameras/rebuildCapabilityMap so one bad derive cannot blank the home grid. No camera-name hardcodes; no JS silentAvAdvance.
+- **Thin embed lock (0.1.27)** — `key(cameraName)` fresh WebView per camera; block `#cameras` / `/cameras/`; require embed `?src=`; on non-embed navigate reload intended once then fail to OkHttp.
+- **Probe href (0.1.26+)** — FalcorAudioProbe snackbar includes truncated `location.href` for FrontYard→roaming3 embed proof.
 - **Prefer A/V+listen live src (0.1.22)** — live WebView `?src=` prefers go2rtc/main keys with **both** video and audio (`#video=` / plain `rtsp://` **and** `#audio=`/opus/aac). Skips audio-only helpers (`ffmpeg:…#audio=opus` without video — typical `*_webrtc` / "WebRTC Audio"). Main/Sub chips bind to `state.quality` (default MAIN); probe `q=` matches. Video-only cams keep video src + no-listen snackbar.
 - **Diagnostic probe for listen audio (0.1.20)** — after live WebView playing (+ ~2s), Snackbar + `Log.i("FalcorAudioProbe")` report src/quality/pathKind/muted/volume/tracks (probe-only; no product mute changes). Kept to verify A/V src + `vTracks=1`.
 - **Native HTML5 controls (0.1.19)** — live WebView leaves the native control bar **visible** (`controls=true`); do not CSS-hide `::-webkit-media-controls*`. Default muted is fine; user unmutes via the HTML5 bar. Removed AppBar mute IconButton, Tap-for-sound overlay, `__falcorMuted` / `applyMute` storms, and volumechange re-sync that fought the page.

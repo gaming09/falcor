@@ -7,7 +7,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pure unit tests for live src / player-page selection helpers (0.1.22–0.1.26).
+ * Pure unit tests for live src / player-page selection helpers (0.1.27).
+ * Thinner surface: MSE-first is page-order only (!opus/A/V remux) — no hasListen gate.
+ * detectListenAudio / cameraHasListenCapableStream match 0.1.25 (no plain-RTSP expansion).
  * Never hardcode product camera names in production code — fixtures here are local only.
  */
 class LiveStreamSelectionTest {
@@ -35,7 +37,7 @@ class LiveStreamSelectionTest {
         assertTrue(isAvListenCapableStream("FrontCam", g))
         assertTrue(isAudioOnlyGo2rtcStream("FrontCam_webrtc", g))
         assertFalse(isUsableLiveVideoSrc("FrontCam_webrtc", g))
-        assertFalse(preferMseFirstLivePlayer("FrontCam", g, hasListen = true))
+        assertFalse(preferMseFirstLivePlayer("FrontCam", g))
 
         val preferred = resolvePreferredLiveStreamName(
             cameraName = "FrontCam",
@@ -49,12 +51,13 @@ class LiveStreamSelectionTest {
     }
 
     @Test
-    fun plainRtsp_notWebRtcFriendly_butListenWhenAudioEnabled() {
+    fun plainRtsp_notWebRtcFriendly_mseFirstWithoutListenGate() {
         val g = go2rtc("YardCam" to "rtsp://192.168.1.50:554/cam/realmonitor")
         assertFalse(streamHasOpusOrWebRtcFriendlyAudio("YardCam", g))
         assertFalse(isAvListenCapableStream("YardCam", g)) // no #audio= on source
 
         val cam = camera(audioEnabled = true, liveStreams = mapOf("main" to "YardCam"))
+        // 0.1.25 detectListen: audio.enabled alone is enough
         assertTrue(
             detectListenAudio(
                 cameraName = "YardCam",
@@ -64,7 +67,8 @@ class LiveStreamSelectionTest {
                 talkCapable = false
             )
         )
-        assertTrue(
+        // 0.1.25 cameraHasListenCapableStream does NOT expand via detectListenAudio
+        assertFalse(
             cameraHasListenCapableStream(
                 cameraName = "YardCam",
                 camera = cam,
@@ -72,8 +76,8 @@ class LiveStreamSelectionTest {
                 go2rtc = g
             )
         )
-        assertTrue(preferMseFirstLivePlayer("YardCam", g, hasListen = true))
-        assertFalse(preferMseFirstLivePlayer("YardCam", g, hasListen = false))
+        // Page-order MSE-first: plain RTSP → mse without hasListen gate
+        assertTrue(preferMseFirstLivePlayer("YardCam", g))
     }
 
     @Test
@@ -94,7 +98,7 @@ class LiveStreamSelectionTest {
             )
         )
         assertFalse(streamHasOpusOrWebRtcFriendlyAudio("PorchCam", g))
-        assertTrue(preferMseFirstLivePlayer("PorchCam", g, hasListen = true))
+        assertTrue(preferMseFirstLivePlayer("PorchCam", g))
     }
 
     @Test
@@ -103,7 +107,7 @@ class LiveStreamSelectionTest {
         assertTrue(isAvListenCapableStream("GateCam", g))
         // A/V+#audio=aac still counts as WebRTC-friendly A/V+listen remux for page order
         assertTrue(streamHasOpusOrWebRtcFriendlyAudio("GateCam", g))
-        assertFalse(preferMseFirstLivePlayer("GateCam", g, hasListen = true))
+        assertFalse(preferMseFirstLivePlayer("GateCam", g))
     }
 
     @Test
@@ -120,7 +124,7 @@ class LiveStreamSelectionTest {
     }
 
     @Test
-    fun orderedUrls_plainRtspListen_mseFirst() {
+    fun orderedUrls_plainRtsp_mseFirst() {
         val urls = orderedLiveEmbedPageUrls(
             baseUrl = "https://nvr.example:8971",
             encodedSrc = "YardCam",
