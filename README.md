@@ -3,13 +3,13 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.18**
+Version: **0.1.19**
 
-## Features (0.1.18)
+## Features (0.1.19)
 
-- **Unified AppBar mute (0.1.18)** — HTML5 media controls suppressed (`controls=false` + hide webkit mute/volume chrome). AppBar speaker is the sole mute owner: `applyMute` sets `video.muted` / volume / audioTracks + play + `AudioContext.resume` (no DOM mute clicks). `window.__falcorMuted` + ~800ms re-apply fights go2rtc remute; late media/iframe hooks; first tap on video surface re-applies unmute. Default `audioMuted=false`.
-- **Live listen audio** — WebView live defaults **unmuted**; after play, unmute+play retries. Requests `STREAM_MUSIC` / `AudioFocusRequest` while live WebView is up.
-- **Push-to-talk** — broader Reolink/ONVIF/backchannel/opus talk detection; mic grant only while talking; on PTT release restores `applyMute(audioMuted)` (idle MicOff ≠ listen mute); while talking never falls through to ExoPlayer.
+- **Native HTML5 controls (0.1.19)** — live WebView leaves the native control bar **visible** (`controls=true`); do not CSS-hide `::-webkit-media-controls*`. Default muted is fine; user unmutes via the HTML5 bar. Removed AppBar mute IconButton, Tap-for-sound overlay, `__falcorMuted` / `applyMute` storms, and volumechange re-sync that fought the page.
+- **Live listen audio** — WebView play + `STREAM_MUSIC` / `AudioFocusRequest`; mute state owned by native controls only. Minimal chrome JS (black background / object-fit) does not strip controls or force mute.
+- **Push-to-talk** — broader Reolink/ONVIF/backchannel/opus talk detection; mic grant only while talking; while talking never falls through to ExoPlayer.
 - **WebView-primary live (kept)** — single go2rtc embed (`webrtc.html` / mse); one surface only. No ExoPlayer on the open-camera path.
 - **Fallback** — if WebView exhausts all page URLs → OkHttp MJPEG/snapshot (replaces WebView). ExoPlayer demoted / unused on live open.
 - **Version in UI** — home app bar and connect screen show `Falcor {VERSION_NAME}` from `BuildConfig`.
@@ -84,7 +84,7 @@ Press and hold **Hold to talk** (large button centered under History). Falcor:
 2. Loads `$base/live/webrtc/webrtc.html?src=<talkOrLive>&media=video+audio+microphone` (plus go2rtc fallbacks).
 3. Grants WebView `AUDIO_CAPTURE` via `WebChromeClient.onPermissionRequest`.
 4. Injects CSS that suppresses HTML5 media controls + autoplay (AppBar mute via JS; no DOM mute-button clicking).
-5. On release, restores WebView-primary live and re-applies `audioMuted`.
+5. On release, restores WebView-primary live (native HTML5 controls own mute).
 
 **Frigate-side caveats:** Two-way audio needs a go2rtc source that supports talk-back (`onvif://` / `reolink://` with `#backchannel` / `#audio=opus`, or an explicit talk stream). Listen audio (`media=video+audio`) still works without a mic path. If hold-to-talk never connects after mic permission, verify Frigate/go2rtc talk config for that camera and that WebRTC (often UDP/TCP **8555**) is reachable from the phone.
 
@@ -133,7 +133,7 @@ Tap Cast on the camera screen. If no Cast session is connected, Falcor opens the
 
 ### Live audio mute
 
-**AppBar volume icon** is the sole mute control for WebView live. HTML5 `video.controls` are suppressed. Mute applies `video.muted` / volume / audioTracks + `AudioContext.resume` via `WebViewAudioController.applyMute` — it never changes stream URLs or clicks page mute UI.
+**Native HTML5 mute/volume bar** on the WebView live surface is the mute control. Falcor does not hide it or force `video.muted` from Compose — unmute via the bar to hear audio.
 
 ## Known limits
 

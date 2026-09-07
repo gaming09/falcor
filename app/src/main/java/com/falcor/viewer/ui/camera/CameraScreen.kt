@@ -49,8 +49,6 @@ import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -102,7 +100,6 @@ import com.falcor.viewer.player.AuthenticatedClipPlayer
 import com.falcor.viewer.player.AuthenticatedLivePlayer
 import com.falcor.viewer.player.Go2rtcWebRtcPlayer
 import com.falcor.viewer.player.FrigateLiveWebView
-import com.falcor.viewer.player.WebViewAudioController
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.foundation.layout.heightIn
 import com.falcor.viewer.cast.CastOutcome
@@ -123,7 +120,6 @@ fun CameraScreen(
     val activity = context as? Activity
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    val audioController = remember { WebViewAudioController() }
     val ptzWsError = stringResource(R.string.camera_ptz_ws_error)
     val ptzCmdError = stringResource(R.string.camera_ptz_command_error)
     val talkWebRtcError = stringResource(R.string.camera_talk_webrtc_failed)
@@ -201,30 +197,6 @@ fun CameraScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = {
-                        val nextMuted = !state.audioMuted
-                        // Sole writer: AppBar desired state + sync evaluateJavascript applyMute.
-                        // Never reload URLs; never click HTML5/DOM mute buttons.
-                        viewModel.setAudioMuted(nextMuted)
-                        if (state.talking || state.useWebViewLive) {
-                            audioController.applyMute(nextMuted) { actual ->
-                                // One read-back for honesty only when mute stuck ON matches intent.
-                                // Do NOT adopt page-muted while wanting unmuted (autoplay fight).
-                                if (nextMuted && !actual) {
-                                    // Rare: mute did not stick — leave desired muted; retry once.
-                                    audioController.applyMute(true)
-                                }
-                            }
-                        }
-                    }) {
-                        Icon(
-                            if (state.audioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                            contentDescription = stringResource(
-                                if (state.audioMuted) R.string.camera_unmute
-                                else R.string.camera_mute
-                            )
-                        )
-                    }
                     IconButton(onClick = { viewModel.setShowDetections(!state.showDetections) }) {
                         Icon(
                             if (state.showDetections) Icons.Default.Visibility else Icons.Default.VisibilityOff,
@@ -290,7 +262,6 @@ fun CameraScreen(
                             state = state,
                             viewModel = viewModel,
                             isLandscape = isLandscape,
-                            audioController = audioController,
                             modifier = Modifier.fillMaxWidth()
                         )
                         if (state.talking) {
@@ -417,8 +388,6 @@ fun CameraScreen(
                                 },
                                 onRelease = {
                                     viewModel.setTalking(false)
-                                    // Restore listen mute after PTT (MicOff ≠ listen mute).
-                                    audioController.applyMute(state.audioMuted)
                                 }
                             )
                         }
@@ -430,7 +399,7 @@ fun CameraScreen(
     }
 
     if (state.fullscreen) {
-        FullscreenLiveDialog(state = state, viewModel = viewModel, audioController = audioController)
+        FullscreenLiveDialog(state = state, viewModel = viewModel)
     }
 
     if (state.ptzSheetOpen && state.ptzSupported) {
@@ -511,8 +480,7 @@ private fun LiveOrClipSurface(
     viewModel: CameraViewModel,
     isLandscape: Boolean,
     modifier: Modifier = Modifier,
-    fill: Boolean = false,
-    audioController: WebViewAudioController? = null
+    fill: Boolean = false
 ) {
     val aspectMod = if (fill) {
         modifier.fillMaxSize()
@@ -547,8 +515,6 @@ private fun LiveOrClipSurface(
                                 fillAspect = false,
                                 showDetections = false,
                                 allowMicrophone = true,
-                                muted = false,
-                                audioController = audioController,
                                 onAllFailed = { viewModel.onTalkWebRtcFailed() },
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -573,8 +539,6 @@ private fun LiveOrClipSurface(
                             fillAspect = false,
                             showDetections = false,
                             allowMicrophone = false,
-                            muted = state.audioMuted,
-                            audioController = audioController,
                             onAllFailed = { viewModel.onWebViewLiveFailed() },
                             modifier = Modifier.fillMaxSize()
                         )
@@ -642,8 +606,7 @@ private fun LiveOrClipSurface(
 @Composable
 private fun FullscreenLiveDialog(
     state: CameraUiState,
-    viewModel: CameraViewModel,
-    audioController: WebViewAudioController
+    viewModel: CameraViewModel
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -686,7 +649,6 @@ private fun FullscreenLiveDialog(
                 viewModel = viewModel,
                 isLandscape = true,
                 fill = true,
-                audioController = audioController,
                 modifier = Modifier.fillMaxSize()
             )
             if (state.talking) {

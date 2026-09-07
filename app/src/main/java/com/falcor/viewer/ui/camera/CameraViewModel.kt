@@ -69,7 +69,7 @@ data class CameraUiState(
     val scrubTimestamp: Double? = null,
     val fullscreen: Boolean = false,
     val showDetections: Boolean = false,
-    /** AppBar listen-mute flag (WebView applyMute). Default unmuted. Not the PTT MicOff icon. */
+    /** Mute for demoted native players (Exo/VLC/WebRTC). WebView live uses native HTML5 controls. */
     val audioMuted: Boolean = false,
     val detectionBoxes: List<DetectionBox> = emptyList(),
     val error: Boolean = false
