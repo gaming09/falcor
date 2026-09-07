@@ -53,6 +53,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Minimal chrome JS: black background + object-fit only (does not strip controls or force mute)
  * - 0.1.20-debug: FalcorAudioProbe snackbar + Log.i (probe-only; no product audio changes)
  * - 0.1.22-debug: keep probe; live src prefers A/V+listen, skips audio-only *_webrtc
+ * - 0.1.23-debug: MSE-first when no opus/A/V+listen; on webrtc aTracks==0 + video playing
+ *   advance candidate (do not wait for main-frame error). No applyMute revival.
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -408,6 +410,21 @@ private fun audioProbeJs(qualityLabel: String, candidateIndex: Int, hasListen: I
           window.FalcorAudioProbe.report(snack, detail);
         }
       } catch(e) {}
+      // WebRTC playing with no audio tracks → advance to next candidate (usually MSE).
+      // Do NOT do this on mse/stream: MSE often has srcObject=null so aTracks stays 0
+      // even when AAC audio is audible via the media element.
+      try {
+        var videoPlaying = v0 && !v0.paused && (v0.readyState >= 2 || v0.vTracks > 0);
+        if (kind === 'webrtc' && videoPlaying && aTrackN === 0 &&
+            !window.__falcorSilentAvAdvanceDone) {
+          window.__falcorSilentAvAdvanceDone = true;
+          if (window.FalcorAudioProbe && window.FalcorAudioProbe.silentAvAdvance) {
+            window.FalcorAudioProbe.silentAvAdvance(
+              'webrtc aTracks=0 videoPlaying reason=' + reason
+            );
+          }
+        }
+      } catch(eAdv) {}
     } catch(e) {
       try {
         if (window.FalcorAudioProbe && window.FalcorAudioProbe.report) {
@@ -437,7 +454,8 @@ private fun audioProbeJs(qualityLabel: String, candidateIndex: Int, hasListen: I
 }
 
 private class FalcorAudioProbeBridge(
-    private val callbackHolder: Array<((String) -> Unit)?>
+    private val callbackHolder: Array<((String) -> Unit)?>,
+    private val advanceHolder: Array<(() -> Unit)?>
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -450,6 +468,21 @@ private class FalcorAudioProbeBridge(
             mainHandler.post {
                 callbackHolder.getOrNull(0)?.invoke(s)
             }
+        }
+    }
+
+    /**
+     * WebRTC live played video with aTracks==0 — advance candidate (MSE) without
+     * waiting for a main-frame load error.
+     */
+    @JavascriptInterface
+    fun silentAvAdvance(reason: String?) {
+        android.util.Log.i(
+            "FalcorAudioProbe",
+            "silentAvAdvance ${reason.orEmpty()}"
+        )
+        mainHandler.post {
+            advanceHolder.getOrNull(0)?.invoke()
         }
     }
 }
@@ -518,10 +551,15 @@ private fun keyAndroidView(
 
                 val probeCb = arrayOf(probeState)
                 setTag(R.id.falcor_webview_probe_cb_tag, probeCb)
+                val advanceCb = arrayOf<(() -> Unit)?>(onErrorState)
+                setTag(R.id.falcor_webview_silent_advance_tag, advanceCb)
                 val hl = if (hasListenState == true) 1 else 0
                 val probeMeta = ProbeMeta(qualityState, candState, hl)
                 setTag(R.id.falcor_webview_probe_meta_tag, probeMeta)
-                addJavascriptInterface(FalcorAudioProbeBridge(probeCb), "FalcorAudioProbe")
+                addJavascriptInterface(
+                    FalcorAudioProbeBridge(probeCb, advanceCb),
+                    "FalcorAudioProbe"
+                )
 
                 webChromeClient = object : WebChromeClient() {
                     override fun onPermissionRequest(request: PermissionRequest?) {
@@ -605,6 +643,9 @@ private fun keyAndroidView(
             @Suppress("UNCHECKED_CAST")
             (webView.getTag(R.id.falcor_webview_probe_cb_tag) as? Array<((String) -> Unit)?>)
                 ?.set(0, probeState)
+            @Suppress("UNCHECKED_CAST")
+            (webView.getTag(R.id.falcor_webview_silent_advance_tag) as? Array<(() -> Unit)?>)
+                ?.set(0, onErrorState)
             (webView.getTag(R.id.falcor_webview_probe_meta_tag) as? ProbeMeta)?.let {
                 it.quality = qualityState
                 it.candidateIndex = candState

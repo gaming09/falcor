@@ -3,10 +3,11 @@
 **Falcor** is an Android client for [Frigate NVR](https://frigate.video/). Browse cameras, watch smooth live video with **live audio**, pinch-zoom, press-and-hold talk-back, rearrange the home grid, review clips, pin dashboards, control PTZ, and cast a single camera stream.
 
 Package ID: `com.falcor.viewer`  
-Version: **0.1.22**
+Version: **0.1.23**
 
-## Features (0.1.22)
+## Features (0.1.23)
 
+- **MSE-first for plain RTSP listen (0.1.23)** — when the chosen live `src` lacks opus / A/V+listen remux markers, player pages prefer **mse.html** before webrtc (AAC over plain `rtsp://` often silent on WebRTC). Opus / `#video=`+`#audio=` remux still webrtc-first (Reolink). If WebRTC plays video with `aTracks==0`, advance to the next candidate (MSE) without waiting for a main-frame error. Listen detection treats plain RTSP + (`camera.audio.enabled` / ffmpeg AAC hints / aac in sources) as listen-capable for caps/snackbar. Keeps probe; no applyMute revival; never hardcodes camera names.
 - **Prefer A/V+listen live src (0.1.22)** — live WebView `?src=` prefers go2rtc/main keys with **both** video and audio (`#video=` / plain `rtsp://` **and** `#audio=`/opus/aac). Skips audio-only helpers (`ffmpeg:…#audio=opus` without video — typical `*_webrtc` / "WebRTC Audio"). Main/Sub chips bind to `state.quality` (default MAIN); probe `q=` matches. Video-only cams keep video src + no-listen snackbar.
 - **Diagnostic probe for listen audio (0.1.20)** — after live WebView playing (+ ~2s), Snackbar + `Log.i("FalcorAudioProbe")` report src/quality/pathKind/muted/volume/tracks (probe-only; no product mute changes). Kept to verify A/V src + `vTracks=1`.
 - **Native HTML5 controls (0.1.19)** — live WebView leaves the native control bar **visible** (`controls=true`); do not CSS-hide `::-webkit-media-controls*`. Default muted is fine; user unmutes via the HTML5 bar. Removed AppBar mute IconButton, Tap-for-sound overlay, `__falcorMuted` / `applyMute` storms, and volumechange re-sync that fought the page.
@@ -64,6 +65,8 @@ On login and home refresh Falcor always fetches `/api/config` and optionally `/a
 | `camera.audio.enabled` **or** source `#audio=` / aac / opus / pcm_* **or** talk | `hasListenAudio` (mute/listen OK even without talk) |
 | `camera.onvif` / ptz/info | `showPtz` |
 | Prefer A/V+listen (`#video=`/rtsp + `#audio=`), skip audio-only `*_webrtc` helpers; then main/sub by quality | `liveStreamName` / live `?src=` |
+| Opus / A/V+listen remux → webrtc.html first; plain RTSP → mse.html first; webrtc `aTracks==0` advances | `livePlayerPageUrls` order + silent advance |
+| Plain `rtsp://` + `audio.enabled` / ffmpeg AAC / aac sources → listen (no `#audio=` required) | `detectListenAudio` / `hasListenCapableLiveSrc` |
 
 Logcat tag `FrigateRepository` prints a short per-camera summary (`talk=… listen=… liveStream=…`).
 

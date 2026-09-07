@@ -16,6 +16,7 @@ import com.falcor.viewer.data.model.deriveCameraCapabilities
 import com.falcor.viewer.data.model.isUsableLiveVideoSrc
 import com.falcor.viewer.data.model.resolvePreferredLiveStreamName
 import com.falcor.viewer.data.model.roleLooksListenCapable
+import com.falcor.viewer.data.model.streamHasOpusOrWebRtcFriendlyAudio
 import com.falcor.viewer.data.model.streamNameLooksListenCapable
 import com.falcor.viewer.data.model.resolveStreamNames
 import com.falcor.viewer.data.model.toUi
@@ -630,6 +631,10 @@ class FrigateRepository(
     /**
      * Candidate Frigate/go2rtc live player pages (MSE/WebRTC) for smooth WebView live.
      * Prefer these over LibVLC; OkHttp MJPEG remains fallback.
+     *
+     * Order: when the chosen live `src` has opus / A/V+listen remux → WebRTC first
+     * (Reolink path). Otherwise MSE first (plain RTSP/AAC — Frigate mobile web path),
+     * with WebRTC still listed as fallback. Never hardcode camera names.
      */
     fun livePlayerPageUrls(
         camera: String,
@@ -665,10 +670,12 @@ class FrigateRepository(
             }
             if (preferSub) pick(true) ?: pick(false) else pick(false) ?: pick(true)
         }
+        val webrtcFriendly = streamHasOpusOrWebRtcFriendlyAudio(preferred, go2rtc)
         Log.d(
             TAG,
             "livePlayerPageUrls camera=$camera preferSub=$preferSub src=$preferred " +
-                "qualitySrc=$qualityOnly listenCapable=${hasListenCapableLiveSrc(camera)}"
+                "qualitySrc=$qualityOnly webrtcFriendly=$webrtcFriendly " +
+                "listenCapable=${hasListenCapableLiveSrc(camera)}"
         )
         val names = linkedSetOf<String>().apply {
             add(preferred)
@@ -682,11 +689,24 @@ class FrigateRepository(
         return buildList {
             names.forEach { n ->
                 val e = enc(n)
-                // webrtc.html before mse — better A/V; auth cookie/JWT still injected in WebView
-                add("$base/live/webrtc/webrtc.html?src=$e&$media")
-                add("$base/api/go2rtc/webrtc.html?src=$e&$media")
-                add("$base/api/go2rtc/stream.html?src=$e&$media")
-                add("$base/live/mse/mse.html?src=$e&$media")
+                val webrtcLive = "$base/live/webrtc/webrtc.html?src=$e&$media"
+                val webrtcApi = "$base/api/go2rtc/webrtc.html?src=$e&$media"
+                val streamHtml = "$base/api/go2rtc/stream.html?src=$e&$media"
+                val mseLive = "$base/live/mse/mse.html?src=$e&$media"
+                // Per-src: opus/A/V+listen → webrtc first; plain RTSP/AAC → mse first.
+                val srcFriendly = streamHasOpusOrWebRtcFriendlyAudio(n, go2rtc) ||
+                    (n == preferred && webrtcFriendly)
+                if (srcFriendly) {
+                    add(webrtcLive)
+                    add(webrtcApi)
+                    add(streamHtml)
+                    add(mseLive)
+                } else {
+                    add(mseLive)
+                    add(streamHtml)
+                    add(webrtcLive)
+                    add(webrtcApi)
+                }
             }
         }.distinct()
     }

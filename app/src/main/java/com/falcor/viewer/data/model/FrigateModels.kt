@@ -550,6 +550,43 @@ fun isAvListenCapableStream(streamName: String, go2rtc: Go2RtcConfig?): Boolean 
     return sourcesHaveVideoSignal(sources) && sourcesHaveListenAudio(sources)
 }
 
+/**
+ * WebRTC-friendly listen audio on [streamName] sources: opus remux and/or explicit
+ * A/V+listen markers (`#video=` + `#audio=`). Plain `rtsp://` (often AAC) is NOT
+ * WebRTC-friendly — prefer MSE player pages for those.
+ */
+fun streamHasOpusOrWebRtcFriendlyAudio(streamName: String, go2rtc: Go2RtcConfig?): Boolean {
+    val sources = go2rtc?.sourceStrings(streamName).orEmpty()
+    if (sources.isEmpty()) return false
+    return sources.any { src ->
+        val lower = src.lowercase()
+        lower.contains("#audio=opus") ||
+            lower.contains("audio=opus") ||
+            lower.contains("codec=opus") ||
+            (
+                VIDEO_SOURCE_MARKERS.any { lower.contains(it) } &&
+                    LISTEN_AUDIO_MARKERS.any { lower.contains(it) }
+                )
+    }
+}
+
+/** True when any source is a plain RTSP(S) publish URL (no ffmpeg: wrapper required). */
+fun sourcesHavePlainRtsp(sources: List<String>): Boolean =
+    sources.any { src ->
+        val lower = src.lowercase().trim()
+        lower.startsWith("rtsp://") || lower.startsWith("rtsps://")
+    }
+
+/** ffmpeg / config text hints that audio (often AAC) is demuxed for the camera. */
+fun ffmpegTextHasAudioHint(ffmpegText: String): Boolean {
+    val lower = ffmpegText.lowercase()
+    return lower.contains("audio") ||
+        lower.contains("-c:a") ||
+        lower.contains("aac") ||
+        lower.contains("pcm_alaw") ||
+        lower.contains("pcm_mulaw")
+}
+
 /** Usable as live WebView video `?src=` — excludes audio-only helpers. */
 fun isUsableLiveVideoSrc(streamName: String, go2rtc: Go2RtcConfig?): Boolean {
     if (streamName.isBlank()) return false
@@ -581,7 +618,8 @@ fun detectListenAudio(
     talkCapable: Boolean
 ): Boolean {
     if (talkCapable) return true
-    if (camera.audio?.enabled == true) return true
+    val audioOn = camera.audio?.enabled == true
+    if (audioOn) return true
 
     val roleMap = camera.live?.streams.orEmpty()
     val go2rtcKeys = go2rtc?.streamKeys.orEmpty()
@@ -592,23 +630,31 @@ fun detectListenAudio(
         roleMap.values.map { it.trim() }.filter { it.isNotEmpty() }.forEach { add(it) }
     }
 
+    val ffmpegText = camera.ffmpeg?.toString().orEmpty()
+    val ffmpegAudioHint = ffmpegTextHasAudioHint(ffmpegText)
+
     for (key in candidateKeys) {
         val sources = go2rtc?.sourceStrings(key).orEmpty()
         if (sources.any { src ->
                 val lower = src.lowercase()
                 LISTEN_AUDIO_MARKERS.any { lower.contains(it) } ||
                     (lower.contains("ffmpeg:") && lower.contains("audio")) ||
+                    lower.contains("aac") ||
                     TALK_SOURCE_MARKERS.any { lower.contains(it) }
             }
         ) {
             return true
         }
+        // Plain RTSP often carries AAC without #audio= markers. Count as listen-capable
+        // when camera.audio.enabled, ffmpeg audio/AAC hints, or any source mentions aac.
+        if (sourcesHavePlainRtsp(sources) &&
+            (audioOn || ffmpegAudioHint || sources.any { it.lowercase().contains("aac") })
+        ) {
+            return true
+        }
     }
 
-    val ffmpegText = camera.ffmpeg?.toString().orEmpty().lowercase()
-    if (ffmpegText.contains("audio") || ffmpegText.contains("-c:a") || ffmpegText.contains("aac")) {
-        return true
-    }
+    if (ffmpegAudioHint) return true
     return false
 }
 
@@ -800,7 +846,16 @@ fun cameraHasListenCapableStream(
                 key.contains(cameraName, true)
         }.forEach { add(it) }
     }
-    return related.any { isListenCapableStream(null, it, go2rtc) }
+    if (related.any { isListenCapableStream(null, it, go2rtc) }) return true
+    // Include camera.audio.enabled / plain RTSP+AAC / ffmpeg audio heuristics
+    // (do not require #audio= alone — Amcrest-style plain RTSP listen).
+    return detectListenAudio(
+        cameraName = cameraName,
+        camera = camera,
+        go2rtc = go2rtc,
+        streamNames = streamNames,
+        talkCapable = false
+    )
 }
 
 fun CameraCapabilities.toUi(): CameraUiModel = CameraUiModel(
